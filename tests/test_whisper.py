@@ -21,7 +21,7 @@ class _FakeInfo:
 
 
 class _FakeModel:
-    def transcribe(self, _: str):
+    def transcribe(self, _: str, **kwargs):
         return [_FakeSegment(0.0, 0.1, "hello")], _FakeInfo()
 
 

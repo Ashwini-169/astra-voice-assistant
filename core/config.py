@@ -21,6 +21,12 @@ class Settings(BaseSettings):
 
     log_level: str = Field(default="INFO")
 
+    # TTS backend: "edge" uses Microsoft Edge TTS (default, no server needed)
+    # "piper" strips emotion tags and sends to Piper server
+    # "fish_speech" passes emotion tags natively to OpenAudio S1 Mini
+    tts_backend: str = Field(default="edge")
+    fish_speech_api_url: AnyHttpUrl = Field(default="http://127.0.0.1:8080")
+
     class Config:
         env_prefix = "AI_ASSISTANT_"
         env_file = ".env"

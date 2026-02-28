@@ -18,9 +18,11 @@ logging.basicConfig(level=logging.INFO)
 
 app = FastAPI(title="Whisper Service", version="0.1.0")
 
-WHISPER_MODEL_NAME = "base"
+WHISPER_MODEL_NAME = "small"       # 244M params — much better accuracy than 'base'
 WHISPER_DEVICE = "cuda"
 WHISPER_COMPUTE_TYPE = "int8_float16"
+WHISPER_LANGUAGE = "en"             # Force English — prevents Urdu/Arabic hallucinations
+WHISPER_INITIAL_PROMPT = "Hello, this is a conversation in English."  # Primes decoder
 
 _whisper_model: Optional[Any] = None
 _model_lock = asyncio.Lock()
@@ -102,7 +104,15 @@ async def _transcribe_file(temp_path: str):
     if model is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
 
-    segments_result, info = await run_in_threadpool(model.transcribe, temp_path)
+    segments_result, info = await run_in_threadpool(
+        model.transcribe,
+        temp_path,
+        language=WHISPER_LANGUAGE,
+        initial_prompt=WHISPER_INITIAL_PROMPT,
+        beam_size=5,
+        vad_filter=True,           # Skip silence frames → faster + cleaner
+        vad_parameters={"min_silence_duration_ms": 500},
+    )
     segments = list(segments_result)
     assembled_text = " ".join(segment.text.strip() for segment in segments)
     segment_spans = [

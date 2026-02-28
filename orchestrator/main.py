@@ -109,7 +109,8 @@ async def _transcribe_wav_bytes(wav_bytes: bytes) -> str:
     raise RuntimeError("Whisper transcription failed")
 
 
-def _capture_user_text(capture: SpeechCapture) -> str:
+def _capture_user_text(capture: SpeechCapture) -> tuple[str, float]:
+    """Capture speech and transcribe. Returns (text, whisper_ms)."""
     if not capture.available:
         raise RuntimeError("sounddevice not installed; install it to use voice mode")
 
@@ -130,18 +131,21 @@ def _capture_user_text(capture: SpeechCapture) -> str:
             )
             continue
 
+        whisper_start = time.perf_counter()
         try:
             user_text = asyncio.run(_transcribe_wav_bytes(wav_bytes))
         except Exception as exc:  # pylint: disable=broad-except
             last_transcribe_error = str(exc)
             logger.warning("[voice] Transcription failed on attempt %s: %s", attempt, exc)
             continue
+        whisper_ms = (time.perf_counter() - whisper_start) * 1000
+
         if not user_text:
             logger.info("[voice] Empty transcription on attempt %s.", attempt)
             continue
 
-        logger.info("[voice] You said: %s", user_text)
-        return user_text
+        logger.info("[voice] You said: %s  (whisper: %.0f ms)", user_text, whisper_ms)
+        return user_text, whisper_ms
 
     if last_diag.speech_frames == 0:
         raise RuntimeError(
@@ -154,6 +158,31 @@ def _capture_user_text(capture: SpeechCapture) -> str:
         "Microphone captured speech, but transcription failed after 3 attempts. "
         f"VAD stats: speech_frames={last_diag.speech_frames}, avg_rms={last_diag.avg_rms:.1f}, max_rms={last_diag.max_rms:.1f}. "
         f"Last Whisper error: {last_transcribe_error or 'unknown'}"
+    )
+
+
+def _log_turn_summary(turn: int, whisper_ms: float, result: Any) -> None:
+    """Print a compact timing summary after each turn."""
+    t = result.timings_ms if hasattr(result, "timings_ms") else {}
+    total = whisper_ms + t.get("intent_ms", 0) + t.get("llm_ms", 0) + t.get("tts_ms", 0)
+    logger.info(
+        "\n╔══════════════ Turn %d Timing ══════════════╗\n"
+        "║  Whisper ASR:  %7.0f ms                  ║\n"
+        "║  Intent:       %7.0f ms                  ║\n"
+        "║  LLM (stream): %7.0f ms  (1st tok %s ms) ║\n"
+        "║  TTS:          %7.0f ms                  ║\n"
+        "║  Memory+Embed: %7.0f ms                  ║\n"
+        "║  ──────────────────────────────────────── ║\n"
+        "║  TOTAL:        %7.0f ms                  ║\n"
+        "╚═══════════════════════════════════════════╝",
+        turn,
+        whisper_ms,
+        t.get("intent_ms", 0),
+        t.get("llm_ms", 0),
+        "?",  # first-token logged separately by llm_streamer
+        t.get("tts_ms", 0),
+        t.get("embedding_ms", 0) + t.get("memory_ms", 0),
+        total,
     )
 
 
@@ -175,17 +204,19 @@ def _run_duplex_loop(
         if wav_bytes is None:
             continue
 
+        whisper_start = time.perf_counter()
         try:
             user_text = asyncio.run(_transcribe_wav_bytes(wav_bytes))
         except Exception as exc:  # pylint: disable=broad-except
             logger.error("[duplex] Whisper transcribe failed: %s", exc)
             continue
+        whisper_ms = (time.perf_counter() - whisper_start) * 1000
 
         if not user_text:
             logger.info("[duplex] Empty transcription, waiting for next utterance")
             continue
 
-        logger.info("[duplex] You said: %s", user_text)
+        logger.info("[duplex] You said: %s  (whisper: %.0f ms)", user_text, whisper_ms)
 
         result = asyncio.run(
             run_pipeline_streaming(
@@ -197,6 +228,11 @@ def _run_duplex_loop(
                 visual_feedback=visual_feedback,
             )
         )
+        # Inject whisper timing into result
+        if hasattr(result, "timings_ms"):
+            result.timings_ms["whisper_ms"] = whisper_ms
+
+        _log_turn_summary(turn, whisper_ms, result)
         print_result(result.dict())
         turn += 1
 
@@ -232,8 +268,8 @@ def main() -> None:
     try:
         if args.whisper_test:
             _preflight_for_whisper()
-            user_text = _capture_user_text(speech_capture)
-            print_result({"transcript": user_text})
+            user_text, whisper_ms = _capture_user_text(speech_capture)
+            print_result({"transcript": user_text, "whisper_ms": round(whisper_ms, 1)})
             return
         if args.duplex:
             _preflight_for_voice()
@@ -241,7 +277,7 @@ def main() -> None:
             _run_duplex_loop(buffer, visual_feedback, state_controller, interrupt_controller, audio_listener, speech_capture)
         elif args.semi_duplex and not args.text:
             _preflight_for_voice()
-            user_text = _capture_user_text(speech_capture)
+            user_text, whisper_ms = _capture_user_text(speech_capture)
             audio_listener.start()
             result = asyncio.run(
                 run_pipeline_streaming(
@@ -253,6 +289,9 @@ def main() -> None:
                     visual_feedback=visual_feedback,
                 )
             )
+            if hasattr(result, "timings_ms"):
+                result.timings_ms["whisper_ms"] = whisper_ms
+            _log_turn_summary(1, whisper_ms, result)
         elif args.stream or args.semi_duplex:
             if args.semi_duplex:
                 audio_listener.start()

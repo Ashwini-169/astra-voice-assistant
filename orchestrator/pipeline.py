@@ -19,6 +19,12 @@ from memory.memory_manager import MemoryManager
 from orchestrator.context_engine import build_prompt
 from orchestrator.gpu_lock import gpu_lock
 from orchestrator.memory_buffer import ConversationBuffer
+from humanization.emotion_tagger import (
+    EmotionStreamBuffer,  # noqa: F401  (imported for type completeness)
+    format_emotion_display,
+    parse_emotion_segments,
+    strip_emotion_tags,
+)
 from performance.metrics_logger import log_metrics
 from streaming.llm_streamer import stream_llm
 from streaming.tts_streamer import stream_tts_from_tokens
@@ -67,7 +73,10 @@ async def _post_json(client: httpx.AsyncClient, url: str, payload: Dict[str, Any
 async def _call_intent(client: httpx.AsyncClient, text: str) -> Tuple[str, float]:
     start = time.perf_counter()
     settings = get_settings()
-    url = f"{settings.intent_host}:{settings.intent_port}" if settings.intent_host.startswith("http") else f"http://{settings.intent_host}:{settings.intent_port}"
+    host = settings.intent_host
+    if host in ("0.0.0.0", "::"):
+        host = "127.0.0.1"
+    url = f"{host}:{settings.intent_port}" if host.startswith("http") else f"http://{host}:{settings.intent_port}"
     try:
         data = await _post_json(client, f"{url}/classify", {"text": text})
         intent = data.get("label", "unknown")
@@ -82,7 +91,10 @@ async def _call_intent(client: httpx.AsyncClient, text: str) -> Tuple[str, float
 async def _call_llm(client: httpx.AsyncClient, prompt: str) -> Tuple[str, float]:
     start = time.perf_counter()
     settings = get_settings()
-    url = f"{settings.llm_host}:{settings.llm_port}" if settings.llm_host.startswith("http") else f"http://{settings.llm_host}:{settings.llm_port}"
+    host = settings.llm_host
+    if host in ("0.0.0.0", "::"):
+        host = "127.0.0.1"
+    url = f"{host}:{settings.llm_port}" if host.startswith("http") else f"http://{host}:{settings.llm_port}"
     data = await _post_json(client, f"{url}/generate", {"prompt": prompt})
     response_text = data.get("response", "")
     elapsed_ms = (time.perf_counter() - start) * 1000
@@ -93,7 +105,10 @@ async def _call_llm(client: httpx.AsyncClient, prompt: str) -> Tuple[str, float]
 async def _call_tts(client: httpx.AsyncClient, text: str) -> Tuple[Optional[int], float]:
     start = time.perf_counter()
     settings = get_settings()
-    url = f"{settings.tts_host}:{settings.tts_port}" if settings.tts_host.startswith("http") else f"http://{settings.tts_host}:{settings.tts_port}"
+    host = settings.tts_host
+    if host in ("0.0.0.0", "::"):
+        host = "127.0.0.1"
+    url = f"{host}:{settings.tts_port}" if host.startswith("http") else f"http://{host}:{settings.tts_port}"
     data = await _post_json(client, f"{url}/speak", {"text": text})
     elapsed_ms = (time.perf_counter() - start) * 1000
     logger.info(json.dumps({"stage": "tts", "tts_ms": round(elapsed_ms, 2)}))
@@ -143,14 +158,20 @@ async def run_pipeline(
                 assistant_text, llm_ms = await _call_llm(client, prompt)
             timings["llm_ms"] = llm_ms
 
-            prosody_text, _ = apply_prosody(assistant_text)
+            # ── Emotion parsing ───────────────────────────────────────
+            emotion_segs = parse_emotion_segments(assistant_text)
+            logger.info("🎭 %s", format_emotion_display(emotion_segs))
+            clean_text = strip_emotion_tags(assistant_text)
+
+            prosody_text, _ = apply_prosody(clean_text)
             tts_status, tts_ms = await _call_tts(client, prosody_text)
             timings["tts_ms"] = tts_ms
 
-            # Store memory after response
+            # Store memory after response (use clean text)
             embed_start = time.perf_counter()
-            memory_manager.add_interaction(text, assistant_text)
+            memory_manager.add_interaction(text, clean_text)
             timings["embedding_ms"] = (time.perf_counter() - embed_start) * 1000
+            assistant_text = clean_text
     except Exception as exc:  # pylint: disable=broad-except
         logger.error("Pipeline failed: %s", exc)
         assistant_text = f"Service error: {exc}"
@@ -223,6 +244,8 @@ async def run_pipeline_streaming(
     # ── LLM + TTS streaming ──────────────────────────────────────────
     _set_state(state_controller, AssistantState.THINKING, visual_feedback)
 
+    llm_start = time.perf_counter()
+
     async def token_iter():
         nonlocal assistant_text
         async for token in stream_llm(prompt):
@@ -233,11 +256,13 @@ async def run_pipeline_streaming(
 
     _set_state(state_controller, AssistantState.SPEAKING, visual_feedback)
 
+    tts_start = time.perf_counter()
     try:
         tts_result = await stream_tts_from_tokens(
             token_iter(),
             interrupt_controller=interrupt_controller,
         )
+        tts_status = 200 if tts_result == "completed" else None
         if tts_result == "interrupted":
             interrupted = True
             _set_state(state_controller, AssistantState.INTERRUPTED, visual_feedback)
@@ -247,20 +272,32 @@ async def run_pipeline_streaming(
     except Exception as exc:
         logger.error("Streaming pipeline error: %s", exc)
 
+    timings["llm_ms"] = (time.perf_counter() - llm_start) * 1000
+    timings["tts_ms"] = (time.perf_counter() - tts_start) * 1000
+
     if interrupted:
         _set_state(state_controller, AssistantState.INTERRUPTED, visual_feedback)
 
-    # ── Save to memory (non-fatal) ───────────────────────────────────
+    # ── Emotion parsing + clean text ─────────────────────────────────
     if assistant_text.strip():
+        emotion_segs = parse_emotion_segments(assistant_text)
+        logger.info("🎭 %s", format_emotion_display(emotion_segs))
+        clean_text = strip_emotion_tags(assistant_text)
+    else:
+        clean_text = assistant_text
+
+    # ── Save to memory (non-fatal, uses clean text) ──────────────────
+    if clean_text.strip():
         try:
             embed_start = time.perf_counter()
-            memory_manager.add_interaction(text, assistant_text)
+            memory_manager.add_interaction(text, clean_text)
             timings["embedding_ms"] = (time.perf_counter() - embed_start) * 1000
         except Exception as exc:
             logger.warning("Memory save failed (non-fatal): %s", exc)
 
     buffer.add("user", text)
-    buffer.add("assistant", assistant_text)
+    buffer.add("assistant", clean_text)
+    assistant_text = clean_text
 
     _set_state(state_controller, AssistantState.IDLE, visual_feedback)
 

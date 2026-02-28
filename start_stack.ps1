@@ -76,20 +76,23 @@ if (-not $ollamaRunning) {
 	Write-Host "Ollama already running on :11434 with $($body.models.Count) model(s)"
 }
 
-# Start Whisper service first
-Start-Process -FilePath $python -ArgumentList "-m", "uvicorn", "services.whisper_service:app", "--host", "0.0.0.0", "--port", "8001" -WindowStyle Minimized
+# ── TTS backend (edge = Microsoft Edge TTS, no server needed) ────────────────
+$env:AI_ASSISTANT_TTS_BACKEND = "edge"
+
+# Start Whisper service first (small model takes ~15s to load)
+Start-Process -FilePath $python -ArgumentList "-m", "uvicorn", "services.whisper_service:app", "--host", "127.0.0.1", "--port", "8001" -WindowStyle Minimized
 Start-Sleep -Seconds 5
 
 # Start LLM service (connects to Ollama and warms model on startup)
-Start-Process -FilePath $python -ArgumentList "-m", "uvicorn", "services.llm_service:app", "--host", "0.0.0.0", "--port", "8002" -WindowStyle Minimized
+Start-Process -FilePath $python -ArgumentList "-m", "uvicorn", "services.llm_service:app", "--host", "127.0.0.1", "--port", "8002" -WindowStyle Minimized
 
 # Start TTS service
-Start-Process -FilePath $python -ArgumentList "-m", "uvicorn", "services.tts_service:app", "--host", "0.0.0.0", "--port", "8003" -WindowStyle Minimized
+Start-Process -FilePath $python -ArgumentList "-m", "uvicorn", "services.tts_service:app", "--host", "127.0.0.1", "--port", "8003" -WindowStyle Minimized
 
 # Start Intent service
-Start-Process -FilePath $python -ArgumentList "-m", "uvicorn", "services.intent_service:app", "--host", "0.0.0.0", "--port", "8004" -WindowStyle Minimized
+Start-Process -FilePath $python -ArgumentList "-m", "uvicorn", "services.intent_service:app", "--host", "127.0.0.1", "--port", "8004" -WindowStyle Minimized
 
-$whisperOk = Wait-HttpHealthy -Name "whisper" -Url "http://127.0.0.1:8001/health" -TimeoutSeconds 120
+$whisperOk = Wait-HttpHealthy -Name "whisper" -Url "http://127.0.0.1:8001/health" -TimeoutSeconds 180
 $llmOk = Wait-HttpHealthy -Name "llm" -Url "http://127.0.0.1:8002/health" -TimeoutSeconds 180
 $ttsOk = Wait-HttpHealthy -Name "tts" -Url "http://127.0.0.1:8003/health" -TimeoutSeconds 120
 $intentOk = Wait-HttpHealthy -Name "intent" -Url "http://127.0.0.1:8004/health" -TimeoutSeconds 120
