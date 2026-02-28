@@ -23,6 +23,16 @@ KNOWN_EMOTIONS: frozenset = frozenset({
 # Matches (any text) or <any text>  — captures group 1 or group 2
 _TAG_RE = re.compile(r"\(([^)]{1,40})\)|<([^>]{1,40})>", re.IGNORECASE)
 
+# ── Sentence-boundary regex for incremental flushing ────────────────────────
+# Matches a sentence-ending punctuation followed by whitespace (or end-of-buf).
+# Used by EmotionStreamBuffer to flush accumulated text at natural pauses even
+# when no emotion tags are present.
+_SENTENCE_END_RE = re.compile(r'(?<=[.!?])\s+')
+
+# When the buffer exceeds this many characters without an emotion-tag flush,
+# force a sentence-boundary flush so TTS starts speaking incrementally.
+_SENTENCE_FLUSH_THRESHOLD = 80
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -180,4 +190,21 @@ class EmotionStreamBuffer:
             raw_emotion = match.group(1) or match.group(2)
             self._current_emotion = _normalize_emotion(raw_emotion)
             self._buf = self._buf[match.end():]
+
+        # ── Sentence-boundary flush (no-tag fallback) ────────────────
+        # When no emotion tags are found and the buffer is long enough,
+        # split at the *last* sentence boundary so TTS starts speaking
+        # incrementally instead of waiting for the entire LLM response.
+        if not output and len(self._buf) >= _SENTENCE_FLUSH_THRESHOLD:
+            # Find the last sentence ending (. ! ?) followed by whitespace
+            last_match = None
+            for m in _SENTENCE_END_RE.finditer(self._buf):
+                last_match = m
+            if last_match is not None:
+                split_pos = last_match.start() + 1  # include the punctuation
+                chunk = self._buf[:split_pos].strip()
+                self._buf = self._buf[last_match.end():]  # skip past the whitespace
+                if chunk:
+                    output.append(EmotionSegment(emotion=self._current_emotion, text=chunk))
+
         return output

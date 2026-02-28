@@ -3,8 +3,16 @@ import argparse
 import asyncio
 import json
 import logging
+import os
+import sys
 import time
 from typing import Any
+
+# Ensure the project root is on sys.path so that
+# `python orchestrator/main.py` works the same as `python -m orchestrator.main`
+_PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
 
 import httpx
 
@@ -253,6 +261,31 @@ async def _run_duplex_async(
     """
     rsm = ResponseStreamManager(interrupt_controller)
     loop = asyncio.get_event_loop()
+
+    # ── Early barge-in: stop TTS audio the instant VAD detects speech ──
+    # This runs inside the sounddevice callback thread so it must be
+    # non-blocking.  We fire a synchronous /stop POST in a daemon thread.
+    import threading as _threading
+    import requests as _requests
+
+    settings = get_settings()
+    _tts_stop_url = (
+        f"{settings.tts_host}:{settings.tts_port}"
+        if settings.tts_host.startswith("http")
+        else f"http://127.0.0.1:{settings.tts_port}"
+    )
+
+    def _barge_in_stop() -> None:
+        """Fire-and-forget TTS /stop from the audio callback thread."""
+        def _do_stop():
+            try:
+                _requests.post(f"{_tts_stop_url}/stop", timeout=1.0)
+                logger.debug("[barge-in] TTS /stop sent")
+            except Exception:  # pylint: disable=broad-except
+                pass
+        _threading.Thread(target=_do_stop, daemon=True).start()
+
+    audio_listener.on_barge_in = _barge_in_stop
 
     # ── Pre-warm the embedding model (lazy-loads on first call) ────────
     logger.info("[duplex] Pre-warming embedding model…")

@@ -3,10 +3,19 @@
 Uses ``EmotionStreamBuffer`` to detect emotion tag boundaries in the LLM
 token stream and flush each segment — with its emotion label — to the
 TTS service as soon as it is complete.
+
+Stream-safety
+~~~~~~~~~~~~~
+* A module-level ``asyncio.Lock`` (``_tts_send_lock``) serialises all
+  ``/speak`` POSTs so two generations can never drive the audio device
+  concurrently.
+* Every send point checks ``is_generation_current_fn`` **before** the
+  HTTP call.  If the generation is stale the segment is silently
+  dropped, preventing audio from a cancelled turn from leaking through.
 """
 import asyncio
 import logging
-from typing import AsyncIterator, Iterable, List, Optional
+from typing import AsyncIterator, Callable, Iterable, List, Optional
 
 import httpx
 
@@ -15,11 +24,17 @@ logger = logging.getLogger(__name__)
 from core.config import get_settings
 from duplex.interrupt_controller import InterruptController
 from humanization.emotion_tagger import EmotionStreamBuffer, EmotionSegment
+from humanization.speech_normalizer import markdown_to_speech
 
 # Minimum characters to accumulate before sending a segment to TTS
 # (avoids tiny HTTP calls for single-word segments between tags)
 MIN_SEGMENT_CHARS = 30
 CHUNK_SIZE = 120  # fallback for plain (no-tag) text chunking
+
+# ── TTS send mutex ───────────────────────────────────────────────────────────
+# Serialises /speak POSTs across all concurrent generations so only one
+# audio segment is ever in-flight to the TTS service at a time.
+_tts_send_lock = asyncio.Lock()
 
 
 def _tts_url() -> str:
@@ -32,18 +47,52 @@ def _tts_url() -> str:
     return host if host.startswith("http") else f"http://{host}:{port}"
 
 
-async def _send_tts_segment(seg: EmotionSegment, client: httpx.AsyncClient, generation_id: int = 0) -> None:
-    """POST a single emotion segment to the TTS service."""
+async def _send_tts_segment(
+    seg: EmotionSegment,
+    client: httpx.AsyncClient,
+    generation_id: int = 0,
+    is_generation_current_fn: Optional[Callable[[], bool]] = None,
+) -> None:
+    """POST a single emotion segment to the TTS service.
+
+    The text is run through ``markdown_to_speech`` before being sent so
+    that asterisks, headings, bullets, code fences, etc. never reach TTS.
+
+    **Ownership gate**: if *is_generation_current_fn* returns ``False``
+    the segment is silently dropped — this prevents stale audio from a
+    cancelled generation from reaching the speaker.
+
+    **Mutex**: the call is wrapped in ``_tts_send_lock`` so at most one
+    ``/speak`` is ever in flight.
+    """
+    # ── ownership check BEFORE acquiring the lock ────────────────────
+    if is_generation_current_fn and not is_generation_current_fn():
+        logger.debug("[tts-stream] gen=%d STALE — dropping segment (%d chars)",
+                     generation_id, len(seg.text))
+        return
+
     url = _tts_url()
-    payload: dict = {"text": seg.text}
+    speech_text = markdown_to_speech(seg.text)
+    if not speech_text.strip():
+        logger.debug("[tts-stream] gen=%d skipping empty segment after normalisation", generation_id)
+        return
+
+    payload: dict = {"text": speech_text}
     if seg.emotion:
         payload["emotion"] = seg.emotion
-    try:
-        resp = await client.post(f"{url}/speak", json=payload, timeout=30.0)
-        logger.info("[tts-stream] gen=%d sent segment (%d chars, emotion=%s) → %s",
-                    generation_id, len(seg.text), seg.emotion, resp.status_code)
-    except Exception as exc:  # pylint: disable=broad-except
-        logger.warning("[tts-stream] gen=%d TTS segment failed (non-fatal): %s", generation_id, exc)
+
+    async with _tts_send_lock:
+        # ── re-check ownership after acquiring the lock ──────────────
+        if is_generation_current_fn and not is_generation_current_fn():
+            logger.debug("[tts-stream] gen=%d STALE after lock — dropping segment",
+                         generation_id)
+            return
+        try:
+            resp = await client.post(f"{url}/speak", json=payload, timeout=30.0)
+            logger.info("[tts-stream] gen=%d sent segment (%d chars, emotion=%s) → %s",
+                        generation_id, len(seg.text), seg.emotion, resp.status_code)
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.warning("[tts-stream] gen=%d TTS segment failed (non-fatal): %s", generation_id, exc)
 
 
 def _is_interrupted(
@@ -83,6 +132,7 @@ async def stream_tts_from_tokens(
     interrupt_controller: Optional[InterruptController] = None,
     cancellation_event: Optional[asyncio.Event] = None,
     generation_id: int = 0,
+    is_generation_current_fn: Optional[Callable[[], bool]] = None,
 ) -> str:
     """Stream LLM tokens through EmotionStreamBuffer → TTS.
 
@@ -90,14 +140,21 @@ async def stream_tts_from_tokens(
     service immediately, so speech begins at each tag boundary rather
     than waiting for the full LLM response.
 
-    Accepts *cancellation_event* from the RSM for fast abort.
+    Accepts *cancellation_event* from the RSM for fast abort and
+    *is_generation_current_fn* for staleness gating at every output
+    point.
     """
     buf = EmotionStreamBuffer()
     pending_segs: List[EmotionSegment] = []
 
+    def _is_stale() -> bool:
+        """Return True if this generation is no longer the current one."""
+        return bool(is_generation_current_fn and not is_generation_current_fn())
+
     async with httpx.AsyncClient() as client:
         async for token in token_iter:  # type: ignore[union-attr]
-            if _is_interrupted(interrupt_flag, interrupt_controller, cancellation_event):
+            if _is_interrupted(interrupt_flag, interrupt_controller, cancellation_event) or _is_stale():
+                logger.debug("[tts-stream] gen=%d interrupted/stale during token loop", generation_id)
                 return "interrupted"
 
             completed = buf.feed(token)
@@ -107,7 +164,7 @@ async def stream_tts_from_tokens(
             remaining: List[EmotionSegment] = []
             for seg in pending_segs:
                 if len(seg.text) >= MIN_SEGMENT_CHARS:
-                    await _send_tts_segment(seg, client, generation_id)
+                    await _send_tts_segment(seg, client, generation_id, is_generation_current_fn)
                     await asyncio.sleep(0)
                 else:
                     remaining.append(seg)
@@ -119,10 +176,11 @@ async def stream_tts_from_tokens(
 
         # Send all remaining segments
         for seg in pending_segs:
-            if _is_interrupted(interrupt_flag, interrupt_controller, cancellation_event):
+            if _is_interrupted(interrupt_flag, interrupt_controller, cancellation_event) or _is_stale():
+                logger.debug("[tts-stream] gen=%d interrupted/stale during flush", generation_id)
                 return "interrupted"
             if seg.text.strip():
-                await _send_tts_segment(seg, client, generation_id)
+                await _send_tts_segment(seg, client, generation_id, is_generation_current_fn)
                 await asyncio.sleep(0)
 
     return "completed"

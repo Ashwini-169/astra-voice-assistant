@@ -136,6 +136,9 @@ class ResponseStreamManager:
         # generation counter — monotonically increasing
         self._generation_counter: int = 0
 
+        # active-stream count — must never exceed 1
+        self._active_stream_count: int = 0
+
         # stats
         self._total_turns = 0
         self._total_interrupts = 0
@@ -144,6 +147,22 @@ class ResponseStreamManager:
     def current_generation_id(self) -> int:
         """The generation id of the most recent turn."""
         return self._generation_counter
+
+    def is_generation_current(self, gen_id: int) -> bool:
+        """Return True only if *gen_id* matches the latest generation.
+
+        Safe to call from any coroutine / callback.  Used by the TTS
+        streamer to gate every ``/speak`` POST.
+        """
+        return gen_id == self._generation_counter
+
+    @property
+    def active_stream_count(self) -> int:
+        """Number of streams currently in a non-terminal state.
+
+        Invariant: must always be 0 or 1.
+        """
+        return self._active_stream_count
 
     # ── public queries ───────────────────────────────────────────────
 
@@ -182,6 +201,7 @@ class ResponseStreamManager:
                 stream.elapsed_ms,
             )
             stream.cancel()
+            self._active_stream_count = max(0, self._active_stream_count - 1)
             self._total_interrupts += 1
 
         # Stop TTS playback (outside lock to avoid deadlock)
@@ -203,12 +223,21 @@ class ResponseStreamManager:
             stream = ResponseStream(generation_id=self._generation_counter)
             stream.state = StreamState.THINKING  # active, not idle
             self._active = stream
+            self._active_stream_count = 1  # exactly one active stream
             self._total_turns += 1
+
+            if self._active_stream_count > 1:
+                logger.error(
+                    "[RSM] ☢ INVARIANT VIOLATION: active_stream_count=%d > 1!",
+                    self._active_stream_count,
+                )
+
             logger.info(
-                "[RSM] ▶ Stream %s started (gen=%d, turn=%d)",
+                "[RSM] ▶ Stream %s started (gen=%d, turn=%d, active=%d)",
                 stream.id,
                 stream.generation_id,
                 self._total_turns,
+                self._active_stream_count,
             )
             return stream
 
@@ -216,11 +245,13 @@ class ResponseStreamManager:
         """Mark current stream as done."""
         if self._active:
             self._active.complete(result)
+            self._active_stream_count = max(0, self._active_stream_count - 1)
             logger.info(
-                "[RSM] ✓ Stream %s gen=%d completed (%.0f ms)",
+                "[RSM] ✓ Stream %s gen=%d completed (%.0f ms, active=%d)",
                 self._active.id,
                 self._active.generation_id,
                 self._active.elapsed_ms,
+                self._active_stream_count,
             )
 
     # ── TTS stop ─────────────────────────────────────────────────────
@@ -250,6 +281,7 @@ class ResponseStreamManager:
             "total_turns": self._total_turns,
             "total_interrupts": self._total_interrupts,
             "current_generation_id": self._generation_counter,
+            "active_stream_count": self._active_stream_count,
             "active_stream": self._active.id if self._active else None,
             "state": self.state.value,
         }

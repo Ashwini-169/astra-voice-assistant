@@ -58,6 +58,7 @@ class PipelineRequest(BaseModel):
 class PipelineResult(BaseModel):
     intent: str
     assistant_text: str
+    assistant_markdown: Optional[str] = None  # raw LLM output with markdown intact
     tts_status: Optional[int]
     timings_ms: Dict[str, float]
     emotional_context: Optional[str] = None
@@ -192,6 +193,7 @@ async def run_pipeline(
     return PipelineResult(
         intent=intent,
         assistant_text=assistant_text,
+        assistant_markdown=assistant_text,
         tts_status=tts_status,
         timings_ms=timings,
         emotional_context=emotional_context,
@@ -291,6 +293,7 @@ async def run_pipeline_streaming(
             interrupt_controller=interrupt_controller,
             cancellation_event=cancellation_event,
             generation_id=generation_id,
+            is_generation_current_fn=is_generation_current_fn,
         )
         tts_status = 200 if tts_result == "completed" else None
         if tts_result == "interrupted":
@@ -309,6 +312,7 @@ async def run_pipeline_streaming(
         _set_state(state_controller, AssistantState.INTERRUPTED, visual_feedback)
 
     # ── Emotion parsing + clean text ─────────────────────────────────
+    raw_markdown = assistant_text  # preserve original for display
     if assistant_text.strip():
         emotion_segs = parse_emotion_segments(assistant_text)
         logger.info("🎭 %s", format_emotion_display(emotion_segs))
@@ -339,6 +343,7 @@ async def run_pipeline_streaming(
     return PipelineResult(
         intent=intent,
         assistant_text=assistant_text,
+        assistant_markdown=raw_markdown,
         tts_status=tts_status,
         timings_ms=timings,
         emotional_context=emotional_context,

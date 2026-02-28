@@ -208,6 +208,15 @@ def _speak_fish_speech(payload: Dict[str, Any]) -> requests.Response:
 
 @app.post("/speak", response_model=SpeakResponse)
 async def speak(request: SpeakRequest) -> SpeakResponse:
+    """Synthesise and play one TTS segment.
+
+    **Audio-safety**: always stops any in-progress MCI playback before
+    starting a new segment.  This guarantees the Windows audio device is
+    never shared between two overlapping playback threads.
+    """
+    # ── Kill any lingering MCI playback FIRST ────────────────────
+    _stop_all_mci()
+
     settings = get_settings()
     backend = settings.tts_backend.lower()
     payload = {"text": request.text, "emotion": request.emotion}

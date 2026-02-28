@@ -105,8 +105,8 @@ if (-not ($whisperOk -and $llmOk -and $ttsOk -and $intentOk)) {
 
 if (-not $ServicesOnly) {
 	Start-Sleep -Seconds 2
-	Write-Host "Starting semi duplex conversation mode..."
-	& $python -m orchestrator.main --semi-duplex
+	Write-Host "Starting duplex conversation mode..."
+	& $python -m orchestrator.main --duplex
 }
 
 Pop-Location

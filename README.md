@@ -272,7 +272,8 @@ pytest -v
 ```bash
 # Interactive conversations
 python orchestrator/main.py --text "Tell me about climate change"
-
+#duplex 
+python -m orchestrator.main --duplex
 # Streaming mode (faster perceived response)
 python orchestrator/main.py --text "Write a poem" --stream
 
@@ -361,25 +362,3 @@ This project demonstrates:
 
 ---
 
-## 📦 Repository & Git Push
-
-To publish this project to GitHub under the repository name `ai-assistant`, create a repository on GitHub (or use the `gh` CLI) and run the commands below from the `ai-assistant` project root.
-
-Replace `<your-username>` with your GitHub username.
-
-```bash
-git init
-git add .
-git commit -m "Initial commit: AI Assistant"
-git branch -M main
-git remote add origin https://github.com/<your-username>/ai-assistant.git
-git push -u origin main
-```
-
-If you use the GitHub CLI you can create and push in one step:
-
-```bash
-gh repo create <your-username>/ai-assistant --public --source=. --remote=origin --push
-```
-
-After pushing, open the GitHub repo URL to verify files and CI (if configured).

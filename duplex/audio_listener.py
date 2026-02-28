@@ -25,17 +25,20 @@ class AudioListener:
         vad_engine: VADEngine,
         interrupt_controller: InterruptController,
         on_vad: Optional[Callable[[bool], None]] = None,
+        on_barge_in: Optional[Callable[[], None]] = None,
         sample_rate: int = 16000,
         channels: int = 1,
     ) -> None:
         self._vad = vad_engine
         self._interrupt_controller = interrupt_controller
         self._on_vad = on_vad
+        self._on_barge_in = on_barge_in
         self._sample_rate = sample_rate
         self._channels = channels
         self._stream = None
         self._enabled = threading.Event()
         self._started = False
+        self._prev_speech = False  # tracks silence→speech edge
 
     @property
     def available(self) -> bool:
@@ -46,6 +49,14 @@ class AudioListener:
             self._enabled.set()
         else:
             self._enabled.clear()
+
+    @property
+    def on_barge_in(self) -> Optional[Callable[[], None]]:
+        return self._on_barge_in
+
+    @on_barge_in.setter
+    def on_barge_in(self, cb: Optional[Callable[[], None]]) -> None:
+        self._on_barge_in = cb
 
     def _callback(self, indata, frames, time_info, status):  # pylint: disable=unused-argument
         if status:
@@ -58,6 +69,15 @@ class AudioListener:
         is_speech = self._vad.is_speech(pcm, sample_rate=self._sample_rate)
         if self._on_vad is not None:
             self._on_vad(is_speech)
+
+        # ── Early barge-in: silence→speech edge fires TTS stop ─────────
+        if is_speech and not self._prev_speech:
+            if self._on_barge_in is not None:
+                try:
+                    self._on_barge_in()
+                except Exception:  # pylint: disable=broad-except
+                    pass  # never crash the audio thread
+        self._prev_speech = is_speech
 
         if self._enabled.is_set() and is_speech:
             self._interrupt_controller.trigger()
