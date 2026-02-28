@@ -32,7 +32,7 @@ def _tts_url() -> str:
     return host if host.startswith("http") else f"http://{host}:{port}"
 
 
-async def _send_tts_segment(seg: EmotionSegment, client: httpx.AsyncClient) -> None:
+async def _send_tts_segment(seg: EmotionSegment, client: httpx.AsyncClient, generation_id: int = 0) -> None:
     """POST a single emotion segment to the TTS service."""
     url = _tts_url()
     payload: dict = {"text": seg.text}
@@ -40,19 +40,22 @@ async def _send_tts_segment(seg: EmotionSegment, client: httpx.AsyncClient) -> N
         payload["emotion"] = seg.emotion
     try:
         resp = await client.post(f"{url}/speak", json=payload, timeout=30.0)
-        logger.info("[tts-stream] sent segment (%d chars, emotion=%s) → %s",
-                    len(seg.text), seg.emotion, resp.status_code)
+        logger.info("[tts-stream] gen=%d sent segment (%d chars, emotion=%s) → %s",
+                    generation_id, len(seg.text), seg.emotion, resp.status_code)
     except Exception as exc:  # pylint: disable=broad-except
-        logger.warning("[tts-stream] TTS segment failed (non-fatal): %s", exc)
+        logger.warning("[tts-stream] gen=%d TTS segment failed (non-fatal): %s", generation_id, exc)
 
 
 def _is_interrupted(
     interrupt_flag: Optional[asyncio.Event],
     interrupt_controller: Optional[InterruptController],
+    cancellation_event: Optional[asyncio.Event] = None,
 ) -> bool:
     if interrupt_flag and interrupt_flag.is_set():
         return True
     if interrupt_controller and interrupt_controller.is_triggered():
+        return True
+    if cancellation_event and cancellation_event.is_set():
         return True
     return False
 
@@ -78,19 +81,23 @@ async def stream_tts_from_tokens(
     token_iter: AsyncIterator[str],
     interrupt_flag: Optional[asyncio.Event] = None,
     interrupt_controller: Optional[InterruptController] = None,
+    cancellation_event: Optional[asyncio.Event] = None,
+    generation_id: int = 0,
 ) -> str:
     """Stream LLM tokens through EmotionStreamBuffer → TTS.
 
     As tokens arrive, completed emotion segments are sent to the TTS
     service immediately, so speech begins at each tag boundary rather
     than waiting for the full LLM response.
+
+    Accepts *cancellation_event* from the RSM for fast abort.
     """
     buf = EmotionStreamBuffer()
     pending_segs: List[EmotionSegment] = []
 
     async with httpx.AsyncClient() as client:
         async for token in token_iter:  # type: ignore[union-attr]
-            if _is_interrupted(interrupt_flag, interrupt_controller):
+            if _is_interrupted(interrupt_flag, interrupt_controller, cancellation_event):
                 return "interrupted"
 
             completed = buf.feed(token)
@@ -100,7 +107,7 @@ async def stream_tts_from_tokens(
             remaining: List[EmotionSegment] = []
             for seg in pending_segs:
                 if len(seg.text) >= MIN_SEGMENT_CHARS:
-                    await _send_tts_segment(seg, client)
+                    await _send_tts_segment(seg, client, generation_id)
                     await asyncio.sleep(0)
                 else:
                     remaining.append(seg)
@@ -112,10 +119,10 @@ async def stream_tts_from_tokens(
 
         # Send all remaining segments
         for seg in pending_segs:
-            if _is_interrupted(interrupt_flag, interrupt_controller):
+            if _is_interrupted(interrupt_flag, interrupt_controller, cancellation_event):
                 return "interrupted"
             if seg.text.strip():
-                await _send_tts_segment(seg, client)
+                await _send_tts_segment(seg, client, generation_id)
                 await asyncio.sleep(0)
 
     return "completed"

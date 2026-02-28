@@ -12,8 +12,10 @@ from duplex.audio_listener import AudioListener
 from duplex.interrupt_controller import InterruptController
 from duplex.speech_capture import CaptureDiagnostics, SpeechCapture
 from duplex.state_machine import AssistantStateController
+from duplex.stream_manager import ResponseStreamManager
 from duplex.vad_engine import VADEngine
 from core.config import get_settings
+from memory.memory_manager import MemoryManager
 from orchestrator.memory_buffer import ConversationBuffer
 from orchestrator.pipeline import run_pipeline, run_pipeline_streaming
 
@@ -161,10 +163,14 @@ def _capture_user_text(capture: SpeechCapture) -> tuple[str, float]:
     )
 
 
-def _log_turn_summary(turn: int, whisper_ms: float, result: Any) -> None:
+def _log_turn_summary(turn: int, whisper_ms: float, result: Any, rsm: ResponseStreamManager | None = None) -> None:
     """Print a compact timing summary after each turn."""
     t = result.timings_ms if hasattr(result, "timings_ms") else {}
     total = whisper_ms + t.get("intent_ms", 0) + t.get("llm_ms", 0) + t.get("tts_ms", 0)
+    rsm_line = ""
+    if rsm:
+        s = rsm.stats()
+        rsm_line = f"\n║  RSM:   turns={s['total_turns']}  interrupts={s['total_interrupts']}      ║"
     logger.info(
         "\n╔══════════════ Turn %d Timing ══════════════╗\n"
         "║  Whisper ASR:  %7.0f ms                  ║\n"
@@ -173,7 +179,7 @@ def _log_turn_summary(turn: int, whisper_ms: float, result: Any) -> None:
         "║  TTS:          %7.0f ms                  ║\n"
         "║  Memory+Embed: %7.0f ms                  ║\n"
         "║  ──────────────────────────────────────── ║\n"
-        "║  TOTAL:        %7.0f ms                  ║\n"
+        "║  TOTAL:        %7.0f ms                  ║%s\n"
         "╚═══════════════════════════════════════════╝",
         turn,
         whisper_ms,
@@ -183,6 +189,7 @@ def _log_turn_summary(turn: int, whisper_ms: float, result: Any) -> None:
         t.get("tts_ms", 0),
         t.get("embedding_ms", 0) + t.get("memory_ms", 0),
         total,
+        rsm_line,
     )
 
 
@@ -194,47 +201,151 @@ def _run_duplex_loop(
     audio_listener: AudioListener,
     capture: SpeechCapture,
 ) -> None:
+    """Controlled duplex loop powered by Response Stream Manager.
+
+    Architecture
+    ~~~~~~~~~~~~
+    ::
+
+        ┌────────────────┐  threadpool   ┌────────────────────┐
+        │ SpeechCapture  │ ────────► │ Whisper ASR (HTTP) │
+        └────────────────┘              └──────────┬─────────┘
+                                          │
+                                          ▼
+                                 ┌───────────────┐
+                                 │      RSM      │  (single active stream)
+                                 └───────┬───────┘
+                                        │
+                           ┌───────────┴───────────┐
+                           ▼                       ▼
+                     LLM (GPU)              TTS (CPU)
+
+    * Only **one active stream** at a time (enforced by RSM)
+    * AudioListener (bg thread) triggers interrupt → RSM cancels
+    * TTS /stop kills MCI playback instantly
+    * GPU never double-booked (gpu_lock in LLM streamer)
+    """
     if not capture.available:
         raise RuntimeError("sounddevice not installed; install it to use --duplex mode")
 
-    turn = 1
+    asyncio.run(
+        _run_duplex_async(
+            buffer, visual_feedback, state_controller,
+            interrupt_controller, audio_listener, capture,
+        )
+    )
+
+
+async def _run_duplex_async(
+    buffer: ConversationBuffer,
+    visual_feedback: bool,
+    state_controller: AssistantStateController,
+    interrupt_controller: InterruptController,
+    audio_listener: AudioListener,
+    capture: SpeechCapture,
+) -> None:
+    """Async event loop for controlled duplex conversation.
+
+    The pipeline runs as an ``asyncio.Task`` so speech capture continues
+    concurrently.  When a new utterance arrives while a pipeline is still
+    running, the old pipeline is cancelled via the RSM generation-id
+    system — guaranteeing only one output stream is ever active.
+    """
+    rsm = ResponseStreamManager(interrupt_controller)
+    loop = asyncio.get_event_loop()
+
+    # ── Pre-warm the embedding model (lazy-loads on first call) ────────
+    logger.info("[duplex] Pre-warming embedding model…")
+    memory_manager = MemoryManager()
+    await loop.run_in_executor(None, memory_manager.retrieve, "warmup")
+    logger.info("[duplex] Embedding model ready")
+
+    pipeline_task: asyncio.Task | None = None
+    turn = 0
+
     while True:
-        logger.info("[duplex] Turn %s: waiting for speech...", turn)
-        wav_bytes = capture.capture_utterance_wav(wait_seconds=30.0)
+        turn += 1
+        logger.info("[duplex] Turn %d: waiting for speech…", turn)
+
+        # ── Capture speech (blocking → threadpool) ─────────────────
+        # This yields control so any running pipeline_task progresses
+        wav_bytes = await loop.run_in_executor(
+            None, capture.capture_utterance_wav, 30.0
+        )
         if wav_bytes is None:
+            turn -= 1
             continue
 
+        # ── Transcribe ─────────────────────────────────────────
         whisper_start = time.perf_counter()
         try:
-            user_text = asyncio.run(_transcribe_wav_bytes(wav_bytes))
+            user_text = await _transcribe_wav_bytes(wav_bytes)
         except Exception as exc:  # pylint: disable=broad-except
             logger.error("[duplex] Whisper transcribe failed: %s", exc)
+            turn -= 1
             continue
         whisper_ms = (time.perf_counter() - whisper_start) * 1000
 
         if not user_text:
             logger.info("[duplex] Empty transcription, waiting for next utterance")
+            turn -= 1
             continue
 
         logger.info("[duplex] You said: %s  (whisper: %.0f ms)", user_text, whisper_ms)
 
-        result = asyncio.run(
-            run_pipeline_streaming(
-                user_text,
-                buffer,
-                interrupt_controller=interrupt_controller,
-                state_controller=state_controller,
-                audio_listener=audio_listener,
-                visual_feedback=visual_feedback,
+        # ── Cancel old pipeline if still running ─────────────────
+        if pipeline_task is not None and not pipeline_task.done():
+            logger.info(
+                "[duplex] ⚡ Interrupting previous pipeline (gen=%d) for new speech",
+                rsm.current_generation_id,
             )
-        )
-        # Inject whisper timing into result
-        if hasattr(result, "timings_ms"):
-            result.timings_ms["whisper_ms"] = whisper_ms
+            await rsm.cancel_active()   # sets cancel_event + POST /stop
+            pipeline_task.cancel()       # cancel the asyncio task
+            try:
+                await pipeline_task      # wait for clean exit
+            except (asyncio.CancelledError, Exception):
+                pass
 
-        _log_turn_summary(turn, whisper_ms, result)
-        print_result(result.dict())
-        turn += 1
+        # ── RSM: create new stream (always stops TTS + increments gen) ──
+        stream = await rsm.start_turn()
+        gen_id = stream.generation_id
+
+        # ── Run pipeline as background task ──────────────────────
+        # Capture loop variables via default args to avoid closure issues
+        async def _process_turn(
+            _turn: int = turn,
+            _text: str = user_text,
+            _wms: float = whisper_ms,
+            _stream=stream,
+            _gid: int = gen_id,
+        ) -> None:
+            try:
+                result = await run_pipeline_streaming(
+                    _text,
+                    buffer,
+                    interrupt_controller=interrupt_controller,
+                    state_controller=state_controller,
+                    audio_listener=audio_listener,
+                    visual_feedback=visual_feedback,
+                    memory_manager=memory_manager,
+                    cancellation_event=_stream.cancel_event,
+                    generation_id=_gid,
+                    is_generation_current_fn=lambda: _gid == rsm.current_generation_id,
+                )
+                rsm.complete_turn(result)
+
+                # Inject whisper timing
+                if hasattr(result, "timings_ms"):
+                    result.timings_ms["whisper_ms"] = _wms
+
+                _log_turn_summary(_turn, _wms, result, rsm=rsm)
+                print_result(result.dict())
+            except asyncio.CancelledError:
+                logger.info("[duplex] Turn %d pipeline cancelled (gen=%d)", _turn, _gid)
+            except Exception as exc:  # pylint: disable=broad-except
+                logger.error("[duplex] Turn %d pipeline error: %s", _turn, exc)
+
+        pipeline_task = asyncio.create_task(_process_turn())
 
 
 def main() -> None:

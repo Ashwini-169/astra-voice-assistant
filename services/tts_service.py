@@ -26,9 +26,13 @@ from humanization.emotion_tagger import strip_emotion_tags
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
-app = FastAPI(title="TTS Service", version="0.3.0")
+app = FastAPI(title="TTS Service", version="0.4.0")
 
 _http_session = requests.Session()
+
+# ── Playback tracking for /stop support ──────────────────────────────────────
+_current_mci_aliases: list[str] = []          # active MCI aliases
+_mci_lock = threading.Lock()                   # guards the alias list
 
 # ── Edge TTS voice mapping by emotion ────────────────────────────────────────
 # Indian English voices with style adjustments
@@ -65,9 +69,11 @@ def _play_mp3_mci(filepath: str) -> None:
     """Play an .mp3 file on Windows using MCI (winmm.dll).
 
     Runs in a daemon thread.  Blocks until playback finishes, then
-    deletes the temp file.  No extra packages required.
+    deletes the temp file.  Alias is tracked so ``/stop`` can kill it.
     """
     alias = f"tts_{threading.get_ident()}"
+    with _mci_lock:
+        _current_mci_aliases.append(alias)
     try:
         winmm = ctypes.windll.winmm  # type: ignore[attr-defined]
         winmm.mciSendStringW(f'open "{filepath}" type mpegvideo alias {alias}', None, 0, 0)
@@ -76,10 +82,31 @@ def _play_mp3_mci(filepath: str) -> None:
     except Exception:
         logger.exception("MCI playback failed for %s", filepath)
     finally:
+        with _mci_lock:
+            if alias in _current_mci_aliases:
+                _current_mci_aliases.remove(alias)
         try:
             os.unlink(filepath)
         except OSError:
             pass
+
+
+def _stop_all_mci() -> int:
+    """Stop and close every tracked MCI alias.  Returns count stopped."""
+    with _mci_lock:
+        aliases = list(_current_mci_aliases)
+    stopped = 0
+    winmm = ctypes.windll.winmm  # type: ignore[attr-defined]
+    for alias in aliases:
+        try:
+            winmm.mciSendStringW(f"stop {alias}", None, 0, 0)
+            winmm.mciSendStringW(f"close {alias}", None, 0, 0)
+            stopped += 1
+        except Exception:  # pylint: disable=broad-except
+            pass
+    with _mci_lock:
+        _current_mci_aliases.clear()
+    return stopped
 
 
 async def _speak_edge(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -197,6 +224,17 @@ async def speak(request: SpeakRequest) -> SpeakResponse:
         response = _speak_piper(payload)
 
     return SpeakResponse(accepted=True, backend_status=response.status_code, backend=backend)
+
+
+@app.post("/stop")
+async def stop_playback():
+    """Immediately stop all active TTS audio playback.
+
+    Called by the Response Stream Manager when the user interrupts.
+    """
+    stopped = _stop_all_mci()
+    logger.info("[tts] /stop → killed %d playback(s)", stopped)
+    return {"stopped": True, "count": stopped}
 
 
 @app.get("/health")

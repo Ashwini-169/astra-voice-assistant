@@ -21,6 +21,10 @@ class Settings(BaseSettings):
 
     log_level: str = Field(default="INFO")
 
+    # LLM generation parameters — controls response length and context window
+    llm_num_predict: int = Field(default=300, description="Max tokens per LLM response (0=unlimited)")
+    llm_num_ctx: int = Field(default=2048, description="Context window size for LLM")
+
     # TTS backend: "edge" uses Microsoft Edge TTS (default, no server needed)
     # "piper" strips emotion tags and sends to Piper server
     # "fish_speech" passes emotion tags natively to OpenAudio S1 Mini

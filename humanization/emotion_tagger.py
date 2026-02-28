@@ -36,11 +36,15 @@ class EmotionSegment:
 def _normalize_emotion(raw: str) -> Optional[str]:
     """Map raw tag text to a canonical emotion name.
 
+    Returns ``None`` for unknown tags so they are treated as plain text
+    rather than being misinterpreted as emotions (e.g. "random access
+    memory" or "solid state drives" from LLM output).
+
     Examples
     --------
     "laughing"                 → "laughing"
     "warm tone with light jolt" → "warm"
-    "sigh"                     → "sigh"
+    "random access memory"     → None  (not a known emotion)
     """
     cleaned = raw.lower().strip()
     if cleaned in KNOWN_EMOTIONS:
@@ -49,8 +53,8 @@ def _normalize_emotion(raw: str) -> Optional[str]:
     for known in KNOWN_EMOTIONS:
         if known in cleaned:
             return known
-    # Return unknown tags as-is so Fish-Speech can still use them
-    return cleaned
+    # Unknown tag — return None so it's treated as content, not emotion
+    return None
 
 
 def parse_emotion_segments(raw_text: str) -> List[EmotionSegment]:
