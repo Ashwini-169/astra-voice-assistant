@@ -1,4 +1,5 @@
 import time
+from unittest.mock import patch, MagicMock
 
 from fastapi.testclient import TestClient
 
@@ -52,6 +53,82 @@ def test_speak_edge(monkeypatch):
 
     with TestClient(tts_service.app) as client:
         response = client.post("/speak", json={"text": "(excited)Hello!", "emotion": "excited"})
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["accepted"] is True
+    assert data["backend"] == "edge"
+
+    get_settings.cache_clear()
+
+
+def test_stop_clears_engine_and_increments_generation(monkeypatch):
+    """Test /stop increments generation and clears the engine."""
+    monkeypatch.setenv("AI_ASSISTANT_TTS_BACKEND", "edge")
+    from core.config import get_settings
+    get_settings.cache_clear()
+
+    initial_gen = tts_service._current_generation
+
+    with TestClient(tts_service.app) as client:
+        response = client.post("/stop")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["stopped"] is True
+    assert tts_service._current_generation == initial_gen + 1
+
+    get_settings.cache_clear()
+
+
+def test_speak_rejects_stale_generation(monkeypatch):
+    """Test that /speak rejects requests with a stale generation_id."""
+    monkeypatch.setenv("AI_ASSISTANT_TTS_BACKEND", "edge")
+    from core.config import get_settings
+    get_settings.cache_clear()
+
+    async def fake_edge(payload):
+        return {"status_code": 200, "audio_bytes": b"fake-audio"}
+
+    monkeypatch.setattr(tts_service, "_speak_edge", fake_edge)
+
+    with TestClient(tts_service.app) as client:
+        # First bump the generation by calling /stop
+        client.post("/stop")
+        current_gen = tts_service._current_generation
+
+        # Now send a /speak with an older generation_id
+        response = client.post("/speak", json={
+            "text": "stale message",
+            "generation_id": current_gen - 1,
+        })
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["accepted"] is False
+    assert data["backend"] == "stale"
+
+    get_settings.cache_clear()
+
+
+def test_speak_accepts_current_generation(monkeypatch):
+    """Test that /speak accepts requests with current generation_id."""
+    monkeypatch.setenv("AI_ASSISTANT_TTS_BACKEND", "edge")
+    from core.config import get_settings
+    get_settings.cache_clear()
+
+    async def fake_edge(payload):
+        return {"status_code": 200, "audio_bytes": b"fake-audio"}
+
+    monkeypatch.setattr(tts_service, "_speak_edge", fake_edge)
+
+    with TestClient(tts_service.app) as client:
+        current_gen = tts_service._current_generation
+        response = client.post("/speak", json={
+            "text": "valid message",
+            "generation_id": current_gen,
+            "chunk_id": 0,
+        })
 
     assert response.status_code == 200
     data = response.json()

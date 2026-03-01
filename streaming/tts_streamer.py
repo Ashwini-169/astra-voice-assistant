@@ -28,8 +28,11 @@ from humanization.speech_normalizer import markdown_to_speech
 
 # Minimum characters to accumulate before sending a segment to TTS
 # (avoids tiny HTTP calls for single-word segments between tags)
-MIN_SEGMENT_CHARS = 30
+MIN_SEGMENT_CHARS = 15  # reduced for faster streaming
 CHUNK_SIZE = 120  # fallback for plain (no-tag) text chunking
+
+# Punctuation that triggers eager segment flush for natural speech boundaries
+SENTENCE_ENDERS = frozenset('.!?।;')
 
 # ── TTS send mutex ───────────────────────────────────────────────────────────
 # Serialises /speak POSTs across all concurrent generations so only one
@@ -52,6 +55,7 @@ async def _send_tts_segment(
     client: httpx.AsyncClient,
     generation_id: int = 0,
     is_generation_current_fn: Optional[Callable[[], bool]] = None,
+    chunk_id: int = 0,
 ) -> None:
     """POST a single emotion segment to the TTS service.
 
@@ -77,7 +81,11 @@ async def _send_tts_segment(
         logger.debug("[tts-stream] gen=%d skipping empty segment after normalisation", generation_id)
         return
 
-    payload: dict = {"text": speech_text}
+    payload: dict = {
+        "text": speech_text,
+        "chunk_id": chunk_id,
+        "generation_id": generation_id,
+    }
     if seg.emotion:
         payload["emotion"] = seg.emotion
 
@@ -89,8 +97,8 @@ async def _send_tts_segment(
             return
         try:
             resp = await client.post(f"{url}/speak", json=payload, timeout=30.0)
-            logger.info("[tts-stream] gen=%d sent segment (%d chars, emotion=%s) → %s",
-                        generation_id, len(seg.text), seg.emotion, resp.status_code)
+            logger.info("[tts-stream] gen=%d chunk=%d sent segment (%d chars, emotion=%s) → %s",
+                        generation_id, chunk_id, len(seg.text), seg.emotion, resp.status_code)
         except Exception as exc:  # pylint: disable=broad-except
             logger.warning("[tts-stream] gen=%d TTS segment failed (non-fatal): %s", generation_id, exc)
 
@@ -146,6 +154,7 @@ async def stream_tts_from_tokens(
     """
     buf = EmotionStreamBuffer()
     pending_segs: List[EmotionSegment] = []
+    chunk_counter: int = 0                    # sequential chunk_id per generation
 
     def _is_stale() -> bool:
         """Return True if this generation is no longer the current one."""
@@ -160,11 +169,19 @@ async def stream_tts_from_tokens(
             completed = buf.feed(token)
             pending_segs.extend(completed)
 
-            # Send any completed segments that meet minimum length
+            # Send any completed segments that meet minimum length OR end with sentence punctuation
             remaining: List[EmotionSegment] = []
             for seg in pending_segs:
-                if len(seg.text) >= MIN_SEGMENT_CHARS:
-                    await _send_tts_segment(seg, client, generation_id, is_generation_current_fn)
+                should_send = (
+                    len(seg.text) >= MIN_SEGMENT_CHARS
+                    or (seg.text.strip() and seg.text.rstrip()[-1] in SENTENCE_ENDERS and len(seg.text) >= 8)
+                )
+                if should_send:
+                    await _send_tts_segment(
+                        seg, client, generation_id,
+                        is_generation_current_fn, chunk_id=chunk_counter,
+                    )
+                    chunk_counter += 1
                     await asyncio.sleep(0)
                 else:
                     remaining.append(seg)
@@ -180,7 +197,11 @@ async def stream_tts_from_tokens(
                 logger.debug("[tts-stream] gen=%d interrupted/stale during flush", generation_id)
                 return "interrupted"
             if seg.text.strip():
-                await _send_tts_segment(seg, client, generation_id, is_generation_current_fn)
+                await _send_tts_segment(
+                    seg, client, generation_id,
+                    is_generation_current_fn, chunk_id=chunk_counter,
+                )
+                chunk_counter += 1
                 await asyncio.sleep(0)
 
     return "completed"
