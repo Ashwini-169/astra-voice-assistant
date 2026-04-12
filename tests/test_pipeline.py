@@ -35,13 +35,17 @@ async def test_pipeline_flow(monkeypatch):
     async def fake_post_json(_client, url: str, payload: Dict[str, Any], timeout: float = 15.0):  # pylint: disable=unused-argument
         if url.endswith("/classify"):
             return {"label": "chat"}
-        if url.endswith("/generate"):
-            return {"response": f"Echo: {payload.get('prompt', '')[:20]}"}
         if url.endswith("/speak"):
             return {"accepted": True, "backend_status": 200}
         raise RuntimeError("Unexpected URL")
 
+    async def fake_stream_llm(prompt: str, **_kwargs):  # pylint: disable=unused-argument
+        text = f"Echo: {prompt[:20]}"
+        for tok in text.split(" "):
+            yield tok + " "
+
     monkeypatch.setattr(pipeline, "_post_json", fake_post_json)
+    monkeypatch.setattr(pipeline, "stream_llm", fake_stream_llm)
 
     start = time.perf_counter()
     result = await pipeline.run_pipeline("Hello there", buffer, memory_manager=_FakeMemory(), emotion_engine=_FakeEmotion())

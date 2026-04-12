@@ -18,9 +18,13 @@ logging.basicConfig(level=logging.INFO)
 
 app = FastAPI(title="Whisper Service", version="0.1.0")
 
-WHISPER_MODEL_NAME = "small"       # 244M params — much better accuracy than 'base'
-WHISPER_DEVICE = "cuda"
-WHISPER_COMPUTE_TYPE = "int8_float16"
+_DEFAULT_LOCAL_MODEL_PATH = os.path.join("models", "faster-whisper-small")
+WHISPER_MODEL_NAME = os.getenv(
+    "AI_ASSISTANT_WHISPER_MODEL_NAME",
+    _DEFAULT_LOCAL_MODEL_PATH if os.path.isdir(_DEFAULT_LOCAL_MODEL_PATH) else "small",
+)
+WHISPER_DEVICE = "cpu"
+WHISPER_COMPUTE_TYPE = "int8"
 WHISPER_LANGUAGE = "en"             # Force English — prevents Urdu/Arabic hallucinations
 WHISPER_INITIAL_PROMPT = ""  # Empty to prevent hallucinations
 
@@ -170,3 +174,4 @@ if __name__ == "__main__":
 
     settings = get_settings()
     run(app, host=settings.whisper_host, port=settings.whisper_port, log_level=settings.log_level.lower())
+

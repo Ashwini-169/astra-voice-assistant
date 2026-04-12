@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 import queue
 import time
 from io import BytesIO
@@ -18,6 +19,8 @@ try:
 except Exception:  # pylint: disable=broad-except
     sd = None
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass
 class CaptureDiagnostics:
@@ -27,6 +30,7 @@ class CaptureDiagnostics:
     avg_rms: float = 0.0
     max_rms: float = 0.0
     duration_sec: float = 0.0
+    error: str = ""
 
 
 class SpeechCapture:
@@ -51,8 +55,12 @@ class SpeechCapture:
         return sd is not None
 
     def capture_utterance_wav(self, wait_seconds: float = 10.0) -> Optional[bytes]:
-        wav_bytes, _ = self.capture_utterance_wav_with_diagnostics(wait_seconds=wait_seconds)
-        return wav_bytes
+        try:
+            wav_bytes, _ = self.capture_utterance_wav_with_diagnostics(wait_seconds=wait_seconds)
+            return wav_bytes
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.error("Speech capture failed: %s", exc)
+            return None
 
     def capture_utterance_wav_with_diagnostics(self, wait_seconds: float = 10.0) -> tuple[Optional[bytes], CaptureDiagnostics]:
         diagnostics = CaptureDiagnostics()
@@ -70,46 +78,53 @@ class SpeechCapture:
             pcm = self._to_pcm16_bytes(indata)
             frames_queue.put(pcm)
 
-        with sd.InputStream(
-            samplerate=self._sample_rate,
-            channels=self._channels,
-            dtype="int16",
-            blocksize=blocksize,
-            callback=callback,
-        ):
-            while True:
-                try:
-                    frame = frames_queue.get(timeout=0.2)
-                except queue.Empty:
-                    if not started and (time.perf_counter() - start_time) > wait_seconds:
-                        diagnostics.duration_sec = time.perf_counter() - start_time
-                        diagnostics.started = started
-                        return None, diagnostics
-                    continue
+        try:
+            with sd.InputStream(
+                samplerate=self._sample_rate,
+                channels=self._channels,
+                dtype="int16",
+                blocksize=blocksize,
+                callback=callback,
+            ):
+                while True:
+                    try:
+                        frame = frames_queue.get(timeout=0.2)
+                    except queue.Empty:
+                        if not started and (time.perf_counter() - start_time) > wait_seconds:
+                            diagnostics.duration_sec = time.perf_counter() - start_time
+                            diagnostics.started = started
+                            return None, diagnostics
+                        continue
 
-                diagnostics.total_frames += 1
-                rms = self._frame_rms(frame)
-                diagnostics.max_rms = max(diagnostics.max_rms, rms)
-                diagnostics.avg_rms = ((diagnostics.avg_rms * (diagnostics.total_frames - 1)) + rms) / diagnostics.total_frames
-                is_speech = self._vad.is_speech(frame, sample_rate=self._sample_rate)
-                if not started:
+                    diagnostics.total_frames += 1
+                    rms = self._frame_rms(frame)
+                    diagnostics.max_rms = max(diagnostics.max_rms, rms)
+                    diagnostics.avg_rms = ((diagnostics.avg_rms * (diagnostics.total_frames - 1)) + rms) / diagnostics.total_frames
+                    is_speech = self._vad.is_speech(frame, sample_rate=self._sample_rate)
+                    if not started:
+                        if is_speech:
+                            started = True
+                            diagnostics.speech_frames += 1
+                            collected.append(frame)
+                        continue
+
+                    collected.append(frame)
+
                     if is_speech:
-                        started = True
                         diagnostics.speech_frames += 1
-                        collected.append(frame)
-                    continue
+                        silence_run = 0
+                    else:
+                        silence_run += 1
 
-                collected.append(frame)
-
-                if is_speech:
-                    diagnostics.speech_frames += 1
-                    silence_run = 0
-                else:
-                    silence_run += 1
-
-                elapsed = time.perf_counter() - start_time
-                if silence_run >= self._silence_frames_to_stop or elapsed >= self._max_record_seconds:
-                    break
+                    elapsed = time.perf_counter() - start_time
+                    if silence_run >= self._silence_frames_to_stop or elapsed >= self._max_record_seconds:
+                        break
+        except Exception as exc:  # pylint: disable=broad-except
+            diagnostics.duration_sec = time.perf_counter() - start_time
+            diagnostics.started = started
+            diagnostics.error = str(exc)
+            logger.warning("Unable to open/read microphone input stream: %s", exc)
+            return None, diagnostics
 
         diagnostics.duration_sec = time.perf_counter() - start_time
         diagnostics.started = started

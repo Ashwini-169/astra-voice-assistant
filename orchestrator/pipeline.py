@@ -17,7 +17,6 @@ from humanization.prosody_engine import apply_prosody
 from humanization.voice_style import INDIAN_NEUTRAL_FEMALE
 from memory.memory_manager import MemoryManager
 from orchestrator.context_engine import build_prompt
-from orchestrator.gpu_lock import gpu_lock
 from orchestrator.memory_buffer import ConversationBuffer
 from humanization.emotion_tagger import (
     EmotionStreamBuffer,  # noqa: F401  (imported for type completeness)
@@ -103,6 +102,18 @@ async def _call_llm(client: httpx.AsyncClient, prompt: str) -> Tuple[str, float]
     return response_text, elapsed_ms
 
 
+async def _collect_llm_stream(prompt: str) -> Tuple[str, float]:
+    """Consume streamed LLM tokens and return full text + elapsed latency."""
+    start = time.perf_counter()
+    parts: list[str] = []
+    async for token in stream_llm(prompt, generation_id=0):
+        parts.append(token)
+    text = "".join(parts)
+    elapsed_ms = (time.perf_counter() - start) * 1000
+    logger.info(json.dumps({"stage": "llm_stream_collected", "llm_ms": round(elapsed_ms, 2)}))
+    return text, elapsed_ms
+
+
 async def _call_tts(client: httpx.AsyncClient, text: str) -> Tuple[Optional[int], float]:
     start = time.perf_counter()
     settings = get_settings()
@@ -155,8 +166,7 @@ async def run_pipeline(
 
             prompt = build_prompt(buffer, text, emotional_state=emotional_context, retrieved_memories=memories_used)
 
-            async with gpu_lock():
-                assistant_text, llm_ms = await _call_llm(client, prompt)
+            assistant_text, llm_ms = await _collect_llm_stream(prompt)
             timings["llm_ms"] = llm_ms
 
             # ── Emotion parsing ───────────────────────────────────────

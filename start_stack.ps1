@@ -34,7 +34,7 @@ function Ensure-Service {
         [string]$Name,
         [string]$HealthUrl,
         [string]$PythonPath,
-        [string[]]$Args,
+        [string[]]$ProcessArgs,
         [int]$TimeoutSeconds = 120
     )
 
@@ -50,7 +50,11 @@ function Ensure-Service {
     }
 
     Write-Host "Starting $Name..."
-    Start-Process -FilePath $PythonPath -ArgumentList $Args -WindowStyle Minimized
+    if (-not $ProcessArgs -or $ProcessArgs.Count -eq 0) {
+        Write-Host "ERROR: No process arguments provided for $Name"
+        return $false
+    }
+    Start-Process -FilePath $PythonPath -ArgumentList $ProcessArgs -WindowStyle Minimized
     return Wait-HttpHealthy -Name $Name -Url $HealthUrl -TimeoutSeconds $TimeoutSeconds
 }
 
@@ -100,10 +104,10 @@ if (-not $ollamaOk) {
     return
 }
 
-$whisperOk = Ensure-Service -Name "whisper" -HealthUrl "http://127.0.0.1:8001/health" -PythonPath $python -Args @("-m", "uvicorn", "services.whisper_service:app", "--host", "127.0.0.1", "--port", "8001") -TimeoutSeconds 180
-$llmOk = Ensure-Service -Name "llm" -HealthUrl "http://127.0.0.1:8002/health" -PythonPath $python -Args @("-m", "uvicorn", "services.llm_service:app", "--host", "127.0.0.1", "--port", "8002") -TimeoutSeconds 180
-$ttsOk = Ensure-Service -Name "tts" -HealthUrl "http://127.0.0.1:8003/health" -PythonPath $python -Args @("-m", "uvicorn", "services.tts_service:app", "--host", "127.0.0.1", "--port", "8003") -TimeoutSeconds 120
-$intentOk = Ensure-Service -Name "intent" -HealthUrl "http://127.0.0.1:8004/health" -PythonPath $python -Args @("-m", "uvicorn", "services.intent_service:app", "--host", "127.0.0.1", "--port", "8004") -TimeoutSeconds 120
+$whisperOk = Ensure-Service -Name "whisper" -HealthUrl "http://127.0.0.1:8001/health" -PythonPath $python -ProcessArgs @("-m", "uvicorn", "services.whisper_service:app", "--host", "127.0.0.1", "--port", "8001") -TimeoutSeconds 180
+$llmOk = Ensure-Service -Name "llm" -HealthUrl "http://127.0.0.1:8002/health" -PythonPath $python -ProcessArgs @("-m", "uvicorn", "services.llm_service:app", "--host", "127.0.0.1", "--port", "8002") -TimeoutSeconds 180
+$ttsOk = Ensure-Service -Name "tts" -HealthUrl "http://127.0.0.1:8003/health" -PythonPath $python -ProcessArgs @("-m", "uvicorn", "services.tts_service:app", "--host", "127.0.0.1", "--port", "8003") -TimeoutSeconds 120
+$intentOk = Ensure-Service -Name "intent" -HealthUrl "http://127.0.0.1:8004/health" -PythonPath $python -ProcessArgs @("-m", "uvicorn", "services.intent_service:app", "--host", "127.0.0.1", "--port", "8004") -TimeoutSeconds 120
 
 if (-not ($whisperOk -and $llmOk -and $ttsOk -and $intentOk)) {
     Write-Host "One or more services are not ready."

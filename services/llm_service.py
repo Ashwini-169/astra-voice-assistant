@@ -1,9 +1,11 @@
 """LLM service that proxies requests to a local Ollama instance."""
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, Iterator
 
+import json
 import requests
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from core.config import get_settings
@@ -20,6 +22,7 @@ _http_session = requests.Session()
 
 class GenerateRequest(BaseModel):
     prompt: str
+    stream: bool = False
 
 
 class GenerateResponse(BaseModel):
@@ -51,6 +54,21 @@ def _post_generate(payload: Dict[str, Any]) -> Dict[str, Any]:
         raise HTTPException(status_code=502, detail="LLM backend unavailable") from exc
 
 
+def _stream_generate(payload: Dict[str, Any]) -> Iterator[bytes]:
+    settings = get_settings()
+    url = f"{str(settings.ollama_api_url).rstrip('/')}/api/generate"
+    try:
+        with _http_session.post(url, json=payload, stream=True, timeout=60) as response:
+            response.raise_for_status()
+            for line in response.iter_lines():
+                if line:
+                    yield line + b"\n"
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.error("Ollama stream failed: %s", exc)
+        error_line = json.dumps({"error": "LLM backend unavailable", "done": True}) + "\n"
+        yield error_line.encode("utf-8")
+
+
 @app.on_event("startup")
 async def warmup_model() -> None:
     settings = get_settings()
@@ -68,14 +86,17 @@ async def warmup_model() -> None:
 
 
 @app.post("/generate", response_model=GenerateResponse)
-async def generate(request: GenerateRequest) -> GenerateResponse:
+async def generate(request: GenerateRequest):
     settings = get_settings()
     payload = {
         "model": settings.llm_model,
         "prompt": request.prompt,
         "keep_alive": KEEP_ALIVE,
-        "stream": False,
+        "stream": bool(request.stream),
     }
+    if request.stream:
+        return StreamingResponse(_stream_generate(payload), media_type="application/x-ndjson")
+
     data = _post_generate(payload)
     text = data.get("response", "")
     return GenerateResponse(model=settings.llm_model, response=text)
