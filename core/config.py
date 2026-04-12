@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     llm_host: str = Field(default="0.0.0.0")
     llm_port: int = Field(default=8002)
     ollama_api_url: AnyHttpUrl = Field(default="http://127.0.0.1:11434")
+    llm_model: str = Field(default="qwen2.5:3b")
 
     tts_host: str = Field(default="0.0.0.0")
     tts_port: int = Field(default=8003)

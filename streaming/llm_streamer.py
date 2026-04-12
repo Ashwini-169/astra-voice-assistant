@@ -19,7 +19,6 @@ import httpx
 from core.config import get_settings
 from orchestrator.gpu_lock import gpu_lock
 
-MODEL_NAME = "qwen2.5-coder:7b"
 logger = logging.getLogger(__name__)
 
 
@@ -47,7 +46,7 @@ async def stream_llm(
 
     # Build Ollama payload with performance options
     payload: dict = {
-        "model": MODEL_NAME,
+        "model": settings.llm_model,
         "prompt": prompt,
         "stream": True,
         "keep_alive": "24h",

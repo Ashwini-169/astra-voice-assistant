@@ -16,3 +16,4 @@ qdrant-client==1.12.1
 sentence-transformers==3.0.1
 sounddevice==0.4.7
 miniaudio>=1.60
+edge-tts==7.2.8

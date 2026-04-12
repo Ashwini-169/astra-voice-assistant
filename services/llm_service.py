@@ -13,7 +13,6 @@ logging.basicConfig(level=logging.INFO)
 
 app = FastAPI(title="LLM Service", version="0.1.0")
 
-OLLAMA_MODEL = "qwen2.5-coder:7b"
 KEEP_ALIVE = "24h"
 
 _http_session = requests.Session()
@@ -54,37 +53,40 @@ def _post_generate(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 @app.on_event("startup")
 async def warmup_model() -> None:
+    settings = get_settings()
     payload = {
-        "model": OLLAMA_MODEL,
+        "model": settings.llm_model,
         "prompt": "warmup",
         "keep_alive": KEEP_ALIVE,
         "stream": False,
     }
     try:
         _post_generate(payload)
-        logger.info("Warmed up Ollama model '%s'", OLLAMA_MODEL)
+        logger.info("Warmed up Ollama model '%s'", settings.llm_model)
     except HTTPException:
-        logger.warning("Warmup failed for model '%s'", OLLAMA_MODEL, exc_info=True)
+        logger.warning("Warmup failed for model '%s'", settings.llm_model, exc_info=True)
 
 
 @app.post("/generate", response_model=GenerateResponse)
 async def generate(request: GenerateRequest) -> GenerateResponse:
+    settings = get_settings()
     payload = {
-        "model": OLLAMA_MODEL,
+        "model": settings.llm_model,
         "prompt": request.prompt,
         "keep_alive": KEEP_ALIVE,
         "stream": False,
     }
     data = _post_generate(payload)
     text = data.get("response", "")
-    return GenerateResponse(model=OLLAMA_MODEL, response=text)
+    return GenerateResponse(model=settings.llm_model, response=text)
 
 
 @app.get("/health")
 async def health():
+    settings = get_settings()
     backend_ready = _ollama_ready()
     if backend_ready:
-        return {"status": "ok", "service": "llm", "model": OLLAMA_MODEL, "backend_ready": True}
+        return {"status": "ok", "service": "llm", "model": settings.llm_model, "backend_ready": True}
     raise HTTPException(status_code=503, detail="LLM backend unavailable")
 
 

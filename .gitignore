@@ -1,0 +1,33 @@
+# Added by code-review-graph
+.code-review-graph/
+
+# Python cache/bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Local runtime/test artifacts
+qdrant_data/
+pytest-cache-files-*/
+*.log
+*.tmp
+
+# IDE/editor
+.vscode/
+.idea/
+
+# Local model/download caches
+.hf_cache/
