@@ -28,10 +28,12 @@ _TAG_RE = re.compile(r"\(([^)]{1,40})\)|<([^>]{1,40})>", re.IGNORECASE)
 # Used by EmotionStreamBuffer to flush accumulated text at natural pauses even
 # when no emotion tags are present.
 _SENTENCE_END_RE = re.compile(r'(?<=[.!?])\s+')
+_WORD_BREAK_RE = re.compile(r'\s+')
 
 # When the buffer exceeds this many characters without an emotion-tag flush,
 # force a sentence-boundary flush so TTS starts speaking incrementally.
-_SENTENCE_FLUSH_THRESHOLD = 80
+_SENTENCE_FLUSH_THRESHOLD = 40
+_WORD_FLUSH_THRESHOLD = 24
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -204,6 +206,19 @@ class EmotionStreamBuffer:
                 split_pos = last_match.start() + 1  # include the punctuation
                 chunk = self._buf[:split_pos].strip()
                 self._buf = self._buf[last_match.end():]  # skip past the whitespace
+                if chunk:
+                    output.append(EmotionSegment(emotion=self._current_emotion, text=chunk))
+
+        # If punctuation has not appeared yet, flush on a word boundary for
+        # lower first-audio latency on long sentences.
+        if not output and len(self._buf) >= _WORD_FLUSH_THRESHOLD:
+            last_word_break = None
+            for m in _WORD_BREAK_RE.finditer(self._buf):
+                last_word_break = m
+            if last_word_break is not None:
+                split_pos = last_word_break.start()
+                chunk = self._buf[:split_pos].strip()
+                self._buf = self._buf[last_word_break.end():]
                 if chunk:
                     output.append(EmotionSegment(emotion=self._current_emotion, text=chunk))
 

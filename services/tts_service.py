@@ -1,18 +1,12 @@
 """Text-to-speech proxy service.
 
-Supports three backends controlled by ``AI_ASSISTANT_TTS_BACKEND``:
+Supports three backends controlled by runtime settings:
 
-* ``edge``        — Microsoft Edge TTS (default, no server needed, internet required)
-* ``piper``       — strips emotion tags, forwards plain text to Piper
-* ``fish_speech`` — reconstructs ``(emotion)text`` and sends to OpenAudio S1 Mini
-
-Audio playback
-~~~~~~~~~~~~~~
-Uses :class:`AudioPlaybackEngine` — a single continuous ``sounddevice``
-output stream with ordered chunk playback and fade smoothing.  Replaces
-the legacy per-chunk MCI (``winmm``) daemon-thread approach which could
-overlap, click, and play out of order.
+* edge        - Microsoft Edge TTS (default)
+* piper       - strips emotion tags, forwards plain text to Piper
+* fish_speech - reconstructs (emotion)text and sends to OpenAudio S1 Mini
 """
+
 import asyncio
 import io
 import logging
@@ -36,43 +30,65 @@ from services.audio_playback_engine import AudioPlaybackEngine
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
-app = FastAPI(title="TTS Service", version="0.5.0")
+app = FastAPI(title="TTS Service", version="0.6.0")
 
 _http_session = requests.Session()
 
-# ── Playback engine (replaces MCI) ──────────────────────────────────────────
+# Playback engine
 _engine = AudioPlaybackEngine(sample_rate=24_000, channels=1)
 
-# ── Generation tracking — stale /speak requests are rejected ────────────────
+# Generation tracking - stale /speak requests are rejected
 _current_generation: int = 0
 _generation_lock = threading.Lock()
 
-# ── Chunk counter — auto-assigned when client doesn't send chunk_id ─────────
+# Chunk counter - auto-assigned when client doesn't send chunk_id
 _chunk_counter: int = 0
 _chunk_lock = threading.Lock()
 
-# ── Edge TTS voice mapping by emotion ────────────────────────────────────────
-# Indian English voices with style adjustments
-_EDGE_DEFAULT_VOICE = "en-IN-NeerjaNeural"  # Female Indian English
+_last_seen_generation_id: Optional[int] = None
+_last_seen_generation_lock = threading.Lock()
+
+# Edge voice mapping by emotion
+_EDGE_DEFAULT_VOICE = "en-IN-NeerjaNeural"
 _EDGE_EMOTION_VOICES: Dict[str, str] = {
-    # Most Edge voices don't support style changes, but we can pick voices
-    # that naturally suit certain tones
-    "excited":    "en-IN-NeerjaNeural",
-    "joyful":     "en-IN-NeerjaNeural",
-    "delighted":  "en-IN-NeerjaNeural",
-    "sad":        "en-IN-NeerjaNeural",
+    "excited": "en-IN-NeerjaNeural",
+    "joyful": "en-IN-NeerjaNeural",
+    "delighted": "en-IN-NeerjaNeural",
+    "sad": "en-IN-NeerjaNeural",
     "empathetic": "en-IN-NeerjaNeural",
-    "angry":      "en-IN-PrabhatNeural",  # Male voice for contrast
-    "confident":  "en-IN-PrabhatNeural",
+    "angry": "en-IN-PrabhatNeural",
+    "confident": "en-IN-PrabhatNeural",
     "whispering": "en-IN-NeerjaNeural",
 }
+
+
+class TTSRuntimeSettings(BaseModel):
+    backend: str = "edge"
+    piper_api_url: str = "http://127.0.0.1:59125"
+    fish_speech_api_url: str = "http://127.0.0.1:8080"
+    edge_default_voice: str = _EDGE_DEFAULT_VOICE
+    edge_base_rate_pct: int = 8
+    chunk_initial_words: int = 5
+    chunk_steady_words: int = 14
+    chunk_max_chars: int = 140
+
+
+class TTSSettingsUpdate(BaseModel):
+    backend: Optional[str] = None
+    piper_api_url: Optional[str] = None
+    fish_speech_api_url: Optional[str] = None
+    edge_default_voice: Optional[str] = None
+    edge_base_rate_pct: Optional[int] = None
+    chunk_initial_words: Optional[int] = None
+    chunk_steady_words: Optional[int] = None
+    chunk_max_chars: Optional[int] = None
 
 
 class SpeakRequest(BaseModel):
     text: str
     emotion: Optional[str] = None
-    chunk_id: Optional[int] = None        # set by tts_streamer
-    generation_id: Optional[int] = None   # set by tts_streamer
+    chunk_id: Optional[int] = None
+    generation_id: Optional[int] = None
 
 
 class SpeakResponse(BaseModel):
@@ -81,27 +97,39 @@ class SpeakResponse(BaseModel):
     backend: str
 
 
-# ── Backend implementations ───────────────────────────────────────────────────
+_runtime_lock = threading.Lock()
+
+
+def _default_runtime_settings() -> TTSRuntimeSettings:
+    settings = get_settings()
+    return TTSRuntimeSettings(
+        backend=settings.tts_backend.lower(),
+        piper_api_url=str(settings.piper_api_url).rstrip("/"),
+        fish_speech_api_url=str(settings.fish_speech_api_url).rstrip("/"),
+        edge_default_voice=_EDGE_DEFAULT_VOICE,
+        edge_base_rate_pct=8,
+        chunk_initial_words=5,
+        chunk_steady_words=14,
+        chunk_max_chars=140,
+    )
+
+
+_runtime_settings = _default_runtime_settings()
+
+
+def _load_runtime_settings() -> TTSRuntimeSettings:
+    with _runtime_lock:
+        return _runtime_settings.model_copy(deep=True)
 
 
 def _decode_mp3(mp3_bytes: bytes) -> Optional[np.ndarray]:
-    """Decode MP3 bytes → 1-D float32 PCM numpy array at engine sample rate.
-
-    Uses ``miniaudio`` (built-in dr_mp3 decoder) with automatic
-    resampling and channel conversion so the output always matches the
-    :class:`AudioPlaybackEngine` format (24 kHz mono float32).
-
-    Returns ``None`` if the audio is empty or miniaudio is unavailable.
-    """
+    """Decode MP3 bytes to mono float32 PCM at engine sample rate."""
     if not mp3_bytes:
         return None
     if miniaudio is None:
-        logger.error("[tts] miniaudio not installed — cannot decode MP3")
+        logger.error("[tts] miniaudio not installed - cannot decode MP3")
         return None
     try:
-        # Ask miniaudio to convert to engine's target format in one step:
-        #   - nchannels=1  → stereo → mono mix-down
-        #   - sample_rate  → resample to engine rate (e.g. 44100 → 24000)
         target_rate = _engine._sr
         decoded = miniaudio.decode(
             mp3_bytes,
@@ -110,47 +138,49 @@ def _decode_mp3(mp3_bytes: bytes) -> Optional[np.ndarray]:
             sample_rate=target_rate,
         )
         pcm = np.frombuffer(decoded.samples, dtype=np.float32).copy()
-        logger.info("[tts] decoded %d MP3 bytes → %d PCM samples @ %d Hz (%.2fs)",
-                    len(mp3_bytes), len(pcm), target_rate,
-                    len(pcm) / target_rate)
+        logger.info(
+            "[tts] decoded %d MP3 bytes -> %d PCM samples @ %d Hz (%.2fs)",
+            len(mp3_bytes),
+            len(pcm),
+            target_rate,
+            len(pcm) / target_rate,
+        )
         return pcm
-    except Exception as exc:
+    except Exception as exc:  # pylint: disable=broad-except
         logger.error("[tts] MP3 decode failed: %s", exc)
         return None
 
 
 async def _speak_edge(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Synthesize speech using Microsoft Edge TTS (no server needed).
-
-    Returns a dict with ``status_code`` and ``audio_bytes`` keys.
-    Audio is decoded to PCM and enqueued for ordered playback via the
-    :class:`AudioPlaybackEngine`.
-    """
-    import edge_tts  # lazy import — only loaded when backend=edge
+    """Synthesize speech using Microsoft Edge TTS."""
+    import edge_tts  # lazy import
 
     clean_text = strip_emotion_tags(payload["text"])
     if not clean_text.strip():
         return {"status_code": 200, "audio_bytes": b""}
 
+    runtime = _load_runtime_settings()
     emotion = payload.get("emotion")
-    voice = _EDGE_EMOTION_VOICES.get(emotion, _EDGE_DEFAULT_VOICE) if emotion else _EDGE_DEFAULT_VOICE
+    default_voice = runtime.edge_default_voice or _EDGE_DEFAULT_VOICE
+    voice = _EDGE_EMOTION_VOICES.get(emotion, default_voice) if emotion else default_voice
 
-    # Adjust rate/pitch based on emotion
-    rate = "+0%"
+    rate_pct = runtime.edge_base_rate_pct
     pitch = "+0Hz"
     if emotion in ("excited", "joyful", "delighted", "surprised"):
-        rate = "+15%"
+        rate_pct += 10
         pitch = "+3Hz"
     elif emotion in ("sad", "depressed", "sympathetic"):
-        rate = "-10%"
+        rate_pct -= 10
         pitch = "-2Hz"
     elif emotion in ("whispering", "scared", "nervous"):
-        rate = "-15%"
+        rate_pct -= 15
         pitch = "-3Hz"
     elif emotion in ("angry", "frustrated", "upset"):
-        rate = "+10%"
+        rate_pct += 8
         pitch = "+2Hz"
 
+    rate_pct = max(-40, min(60, rate_pct))
+    rate = f"{rate_pct:+d}%"
     chunk_id = payload.get("chunk_id", 0)
 
     try:
@@ -161,27 +191,32 @@ async def _speak_edge(payload: Dict[str, Any]) -> Dict[str, Any]:
                 audio_data.write(chunk["data"])
 
         mp3_bytes = audio_data.getvalue()
-
-        # Decode MP3 → PCM float32 and enqueue for ordered playback
         if mp3_bytes:
             pcm = _decode_mp3(mp3_bytes)
             if pcm is not None and len(pcm) > 0:
                 _engine.enqueue(chunk_id, pcm)
 
-        logger.info("[tts] edge synthesized %d bytes → PCM | voice=%s | emotion=%s | chunk=%d",
-                     len(mp3_bytes), voice, emotion, chunk_id)
+        logger.info(
+            "[tts] edge synthesized %d bytes -> PCM | voice=%s | emotion=%s | rate=%s | chunk=%d",
+            len(mp3_bytes),
+            voice,
+            emotion,
+            rate,
+            chunk_id,
+        )
         return {"status_code": 200, "audio_bytes": mp3_bytes}
     except Exception as exc:  # pylint: disable=broad-except
         logger.error("Edge TTS failed: %s", exc)
         raise HTTPException(status_code=502, detail=f"Edge TTS failed: {exc}") from exc
 
+
 def _speak_piper(payload: Dict[str, Any]) -> requests.Response:
     """Send plain stripped text to Piper TTS server."""
-    settings = get_settings()
+    runtime = _load_runtime_settings()
     clean_text = strip_emotion_tags(payload["text"])
     try:
         response = _http_session.post(
-            f"{str(settings.piper_api_url).rstrip('/')}/synthesize",
+            f"{runtime.piper_api_url}/synthesize",
             json={"text": clean_text},
             timeout=15,
         )
@@ -193,20 +228,16 @@ def _speak_piper(payload: Dict[str, Any]) -> requests.Response:
 
 
 def _speak_fish_speech(payload: Dict[str, Any]) -> requests.Response:
-    """Send emotion-tagged text to OpenAudio S1 Mini / Fish-Speech server.
-
-    Fish-Speech natively understands ``(emotion)text`` format, so we
-    reconstruct the tag if an emotion was parsed from the LLM output.
-    """
-    settings = get_settings()
+    """Send emotion-tagged text to OpenAudio S1 Mini / Fish-Speech server."""
+    runtime = _load_runtime_settings()
     emotion = payload.get("emotion")
     raw_text = payload["text"]
     text_for_model = f"({emotion}){raw_text}" if emotion else raw_text
     try:
         response = _http_session.post(
-            f"{str(settings.fish_speech_api_url).rstrip('/')}/v1/tts",
+            f"{runtime.fish_speech_api_url}/v1/tts",
             json={"text": text_for_model, "streaming": False},
-            timeout=60,  # S1 Mini on CPU is slow — allow up to 60s
+            timeout=60,
         )
         response.raise_for_status()
         return response
@@ -215,30 +246,30 @@ def _speak_fish_speech(payload: Dict[str, Any]) -> requests.Response:
         raise HTTPException(status_code=502, detail="Fish-Speech TTS backend unavailable") from exc
 
 
-# ── Routes ────────────────────────────────────────────────────────────────────
-
 @app.post("/speak", response_model=SpeakResponse)
 async def speak(request: SpeakRequest) -> SpeakResponse:
-    """Synthesise and enqueue one TTS segment for ordered playback.
-
-    If the request carries a ``generation_id`` that is older than the
-    current generation (bumped on ``/stop``), the request is rejected as
-    stale — this prevents audio from cancelled turns leaking through the
-    pipeline.
-    """
+    """Synthesise and enqueue one TTS segment for ordered playback."""
     global _chunk_counter
 
-    # ── Reject stale generations ─────────────────────────────────────
     if request.generation_id is not None:
         with _generation_lock:
             if request.generation_id < _current_generation:
                 logger.info(
-                    "[tts] dropping stale /speak  gen=%d < current=%d",
-                    request.generation_id, _current_generation,
+                    "[tts] dropping stale /speak gen=%d < current=%d",
+                    request.generation_id,
+                    _current_generation,
                 )
                 return SpeakResponse(accepted=False, backend_status=200, backend="stale")
 
-    # ── Resolve chunk_id — prefer client-supplied, else auto-assign ──
+    if request.generation_id is not None:
+        with _last_seen_generation_lock:
+            global _last_seen_generation_id  # pylint: disable=global-statement
+            if _last_seen_generation_id is None or request.generation_id != _last_seen_generation_id:
+                _engine.reset_sequence()
+                with _chunk_lock:
+                    _chunk_counter = 0
+                _last_seen_generation_id = request.generation_id
+
     if request.chunk_id is not None:
         chunk_id = request.chunk_id
     else:
@@ -246,8 +277,8 @@ async def speak(request: SpeakRequest) -> SpeakResponse:
             chunk_id = _chunk_counter
             _chunk_counter += 1
 
-    settings = get_settings()
-    backend = settings.tts_backend.lower()
+    runtime = _load_runtime_settings()
+    backend = runtime.backend.lower()
 
     payload: Dict[str, Any] = {
         "text": request.text,
@@ -256,11 +287,11 @@ async def speak(request: SpeakRequest) -> SpeakResponse:
     }
 
     if backend == "edge":
-        logger.info("[tts] edge backend | emotion=%s | chunk=%d | %.60s",
-                    request.emotion, chunk_id, request.text)
+        logger.info("[tts] edge backend | emotion=%s | chunk=%d | %.60s", request.emotion, chunk_id, request.text)
         result = await _speak_edge(payload)
         return SpeakResponse(accepted=True, backend_status=result["status_code"], backend=backend)
-    elif backend == "fish_speech":
+
+    if backend == "fish_speech":
         logger.info("[tts] fish_speech backend | emotion=%s | %.60s", request.emotion, request.text)
         response = _speak_fish_speech(payload)
     else:
@@ -272,36 +303,89 @@ async def speak(request: SpeakRequest) -> SpeakResponse:
 
 @app.post("/stop")
 async def stop_playback():
-    """Immediately stop all active TTS audio playback.
-
-    Called by the Response Stream Manager when the user interrupts.
-    Increments the generation counter ONLY if audio was actually stopped,
-    preventing spurious rejections of valid /speak requests.
-    """
+    """Immediately stop all active TTS audio playback."""
     global _current_generation, _chunk_counter
 
     stopped = _engine.stop_and_clear()
-    
-    # Only increment generation if we actually stopped audio
+
     if stopped > 0:
         with _generation_lock:
             _current_generation += 1
             gen = _current_generation
         with _chunk_lock:
             _chunk_counter = 0
-        logger.info("[tts] /stop → cleared %d chunk(s), generation now %d", stopped, gen)
+        with _last_seen_generation_lock:
+            global _last_seen_generation_id  # pylint: disable=global-statement
+            _last_seen_generation_id = None
+        logger.info("[tts] /stop -> cleared %d chunk(s), generation now %d", stopped, gen)
     else:
         with _generation_lock:
             gen = _current_generation
-        logger.debug("[tts] /stop → nothing playing, generation unchanged (%d)", gen)
-    
+        logger.debug("[tts] /stop -> nothing playing, generation unchanged (%d)", gen)
+
     return {"stopped": True, "count": stopped, "generation": gen}
 
 
 @app.get("/health")
 async def health():
-    settings = get_settings()
-    return {"status": "ok", "service": "tts", "backend": settings.tts_backend}
+    runtime = _load_runtime_settings()
+    return {"status": "ok", "service": "tts", "backend": runtime.backend}
+
+
+@app.get("/settings")
+async def get_runtime_settings():
+    return _load_runtime_settings().model_dump()
+
+
+@app.post("/settings")
+async def update_runtime_settings(update: TTSSettingsUpdate):
+    with _runtime_lock:
+        current = _runtime_settings.model_dump()
+        for key, value in update.model_dump(exclude_none=True).items():
+            current[key] = value
+
+        current["backend"] = str(current["backend"]).lower()
+        if current["backend"] not in {"edge", "piper", "fish_speech"}:
+            raise HTTPException(status_code=400, detail="backend must be one of: edge, piper, fish_speech")
+
+        if int(current["chunk_initial_words"]) < 1:
+            raise HTTPException(status_code=400, detail="chunk_initial_words must be >= 1")
+        if int(current["chunk_steady_words"]) < int(current["chunk_initial_words"]):
+            raise HTTPException(status_code=400, detail="chunk_steady_words must be >= chunk_initial_words")
+        if int(current["chunk_max_chars"]) < 40:
+            raise HTTPException(status_code=400, detail="chunk_max_chars must be >= 40")
+
+        globals()["_runtime_settings"] = TTSRuntimeSettings(**current)
+
+    return {"status": "updated", "settings": _load_runtime_settings().model_dump()}
+
+
+@app.post("/settings/reset")
+async def reset_runtime_settings():
+    with _runtime_lock:
+        globals()["_runtime_settings"] = _default_runtime_settings()
+    return {"status": "reset", "settings": _load_runtime_settings().model_dump()}
+
+
+@app.get("/streaming-config")
+async def get_streaming_config():
+    runtime = _load_runtime_settings()
+    return {
+        "chunk_initial_words": runtime.chunk_initial_words,
+        "chunk_steady_words": runtime.chunk_steady_words,
+        "chunk_max_chars": runtime.chunk_max_chars,
+    }
+
+
+@app.get("/debug/playback")
+async def debug_playback():
+    """Expose playback-engine diagnostics for audio troubleshooting."""
+    return {
+        "generation": _current_generation,
+        "chunk_counter": _chunk_counter,
+        "last_seen_generation_id": _last_seen_generation_id,
+        "engine": _engine.debug_state(),
+    }
 
 
 @app.on_event("shutdown")

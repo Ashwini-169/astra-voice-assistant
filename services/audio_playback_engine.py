@@ -106,6 +106,7 @@ class AudioPlaybackEngine:
         self._active     = False          # True after first enqueue
         self._shutdown   = False
         self._stream: Optional[sd.OutputStream] = None
+        self._last_stream_error: Optional[str] = None
 
         # ── Reorder thread ───────────────────────────────────────────────
         self._thread = threading.Thread(
@@ -135,6 +136,38 @@ class AudioPlaybackEngine:
             self._open_stream()
             self._active = True
         self._in_q.put((chunk_id, pcm_float32))
+
+    def reset_sequence(self) -> int:
+        """Reset chunk ordering state for a new TTS generation.
+
+        The streaming layer restarts ``chunk_id`` at 0 for every new
+        generation.  If the engine's ``_expected_id`` is not reset, new
+        chunks can be buffered forever waiting for an old id.
+
+        Returns the number of queued chunks/slices discarded.
+        """
+        if self._shutdown:
+            return 0
+
+        cleared = 0
+        while True:
+            try:
+                self._in_q.get_nowait()
+                cleared += 1
+            except queue.Empty:
+                break
+
+        with self._reorder_lock:
+            cleared += len(self._reorder)
+            self._reorder.clear()
+            self._expected_id = 0
+
+        with self._buf_lock:
+            cleared += len(self._pcm_buf)
+            self._pcm_buf.clear()
+
+        logger.info("[playback-engine] reset_sequence → discarded %d item(s)", cleared)
+        return cleared
 
     def stop_and_clear(self) -> int:
         """Stop playback instantly. Clear all queued audio.
@@ -181,6 +214,50 @@ class AudioPlaybackEngine:
                 pass
             self._stream = None
         logger.info("[playback-engine] shutdown complete")
+
+    def debug_state(self) -> dict:
+        """Return runtime playback diagnostics for troubleshooting."""
+        state: dict = {
+            "sounddevice_available": sd is not None,
+            "stream_open": self._stream is not None,
+            "engine_active": self._active,
+            "shutdown": self._shutdown,
+            "expected_chunk_id": self._expected_id,
+            "last_stream_error": self._last_stream_error,
+        }
+        with self._reorder_lock:
+            state["reorder_buffer_chunks"] = len(self._reorder)
+        with self._buf_lock:
+            state["pcm_buffer_slices"] = len(self._pcm_buf)
+
+        if self._stream is not None:
+            try:
+                state["stream_stopped"] = bool(self._stream.stopped)
+            except Exception:  # pylint: disable=broad-except
+                state["stream_stopped"] = None
+            try:
+                state["stream_active"] = bool(self._stream.active)
+            except Exception:  # pylint: disable=broad-except
+                state["stream_active"] = None
+        else:
+            state["stream_stopped"] = None
+            state["stream_active"] = None
+
+        if sd is not None:
+            try:
+                default_out = sd.default.device[1]
+                state["default_output_device_index"] = int(default_out) if default_out is not None else None
+                if default_out is not None and int(default_out) >= 0:
+                    state["default_output_device"] = sd.query_devices(int(default_out))
+                else:
+                    state["default_output_device"] = None
+            except Exception as exc:  # pylint: disable=broad-except
+                state["default_output_device"] = None
+                state["default_device_error"] = str(exc)
+        else:
+            state["default_output_device"] = None
+
+        return state
 
     # ── Audio callback (real-time thread) ─────────────────────────────────────
 
@@ -247,7 +324,10 @@ class AudioPlaybackEngine:
             )
         except Exception as exc:
             logger.error("[playback-engine] failed to open output stream: %s", exc)
+            self._last_stream_error = str(exc)
             self._stream = None
+        else:
+            self._last_stream_error = None
 
     # ── Reorder loop (background thread) ──────────────────────────────────────
 

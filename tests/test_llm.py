@@ -43,6 +43,7 @@ def test_generate(monkeypatch):
     assert response.status_code == 200
     data = response.json()
     assert data["model"] == llm_service.get_settings().llm_model
+    assert data["provider"] in {"ollama", "lmstudio", "openai", "custom"}
     assert data["response"].startswith("echo:")
 
 
@@ -54,3 +55,26 @@ def test_generate_stream(monkeypatch):
 
     assert response.status_code == 200
     assert "echo:stream" in response.text
+
+
+def test_settings_update_and_reset():
+    with TestClient(llm_service.app) as client:
+        updated = client.post("/settings", json={"provider": "custom", "custom_url": "http://localhost:9999"})
+        assert updated.status_code == 200
+        assert updated.json()["settings"]["provider"] == "custom"
+
+        current = client.get("/settings")
+        assert current.status_code == 200
+        assert current.json()["provider"] == "custom"
+
+        reset = client.post("/settings/reset")
+        assert reset.status_code == 200
+        assert reset.json()["settings"]["provider"] in {"ollama", "lmstudio", "openai", "custom"}
+
+
+def test_mcp_file_search_endpoint():
+    with TestClient(llm_service.app) as client:
+        response = client.post("/mcp/files/search", json={"query": "LLM", "limit": 3, "path": "services"})
+    assert response.status_code == 200
+    body = response.json()
+    assert "matches" in body

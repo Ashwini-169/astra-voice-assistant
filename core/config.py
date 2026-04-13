@@ -11,6 +11,13 @@ class Settings(BaseSettings):
     llm_port: int = Field(default=8002)
     ollama_api_url: AnyHttpUrl = Field(default="http://127.0.0.1:11434")
     llm_model: str = Field(default="qwen2.5:3b")
+    llm_provider: str = Field(default="ollama")
+    lmstudio_api_url: AnyHttpUrl = Field(default="http://127.0.0.1:1234")
+    openai_api_url: AnyHttpUrl = Field(default="https://api.openai.com/v1")
+    openai_api_key: str = Field(default="")
+    custom_llm_api_url: str = Field(default="")
+    custom_llm_api_key: str = Field(default="")
+    custom_llm_mode: str = Field(default="openai")
 
     tts_host: str = Field(default="0.0.0.0")
     tts_port: int = Field(default=8003)
@@ -25,6 +32,8 @@ class Settings(BaseSettings):
     # LLM generation parameters — controls response length and context window
     llm_num_predict: int = Field(default=300, description="Max tokens per LLM response (0=unlimited)")
     llm_num_ctx: int = Field(default=2048, description="Context window size for LLM")
+    llm_temperature: float = Field(default=0.7, description="Sampling temperature for text generation")
+    llm_top_p: float = Field(default=0.95, description="Nucleus sampling value")
 
     # TTS backend: "edge" uses Microsoft Edge TTS (default, no server needed)
     # "piper" strips emotion tags and sends to Piper server

@@ -274,6 +274,7 @@ async def run_pipeline_streaming(
     _set_state(state_controller, AssistantState.THINKING, visual_feedback)
 
     llm_start = time.perf_counter()
+    llm_done_ms: Optional[float] = None
 
     def _is_cancelled() -> bool:
         """Check all cancellation sources including generation staleness."""
@@ -286,13 +287,17 @@ async def run_pipeline_streaming(
         return False
 
     async def token_iter():
-        nonlocal assistant_text
-        async for token in stream_llm(prompt, cancellation_event=cancellation_event, generation_id=generation_id):
-            if _is_cancelled():
-                logger.debug("[pipeline] gen=%d token_iter cancelled", generation_id)
-                break
-            assistant_text += token
-            yield token
+        nonlocal assistant_text, llm_done_ms
+        try:
+            async for token in stream_llm(prompt, cancellation_event=cancellation_event, generation_id=generation_id):
+                if _is_cancelled():
+                    logger.debug("[pipeline] gen=%d token_iter cancelled", generation_id)
+                    break
+                assistant_text += token
+                yield token
+        finally:
+            if llm_done_ms is None:
+                llm_done_ms = (time.perf_counter() - llm_start) * 1000
 
     _set_state(state_controller, AssistantState.SPEAKING, visual_feedback)
 
@@ -315,7 +320,9 @@ async def run_pipeline_streaming(
     except Exception as exc:
         logger.error("Streaming pipeline error: %s", exc)
 
-    timings["llm_ms"] = (time.perf_counter() - llm_start) * 1000
+    if llm_done_ms is None:
+        llm_done_ms = (time.perf_counter() - llm_start) * 1000
+    timings["llm_ms"] = llm_done_ms
     timings["tts_ms"] = (time.perf_counter() - tts_start) * 1000
 
     if interrupted:
