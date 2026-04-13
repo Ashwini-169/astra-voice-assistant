@@ -16,6 +16,7 @@ from typing import Any, Dict, Optional
 import numpy as np
 import requests
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 try:
@@ -31,6 +32,14 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
 app = FastAPI(title="TTS Service", version="0.6.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 _http_session = requests.Session()
 
@@ -244,6 +253,62 @@ def _speak_fish_speech(payload: Dict[str, Any]) -> requests.Response:
     except Exception as exc:  # pylint: disable=broad-except
         logger.error("Fish-Speech request failed: %s", exc)
         raise HTTPException(status_code=502, detail="Fish-Speech TTS backend unavailable") from exc
+
+
+class SynthesizeRequest(BaseModel):
+    text: str
+    emotion: Optional[str] = None
+
+
+@app.post("/synthesize")
+async def synthesize(request: SynthesizeRequest):
+    """Return raw MP3 audio bytes for browser-side playback."""
+    import edge_tts  # lazy import
+    from fastapi.responses import Response as FastAPIResponse
+
+    clean_text = strip_emotion_tags(request.text)
+    if not clean_text.strip():
+        return FastAPIResponse(content=b"", media_type="audio/mpeg")
+
+    runtime = _load_runtime_settings()
+    emotion = request.emotion
+    default_voice = runtime.edge_default_voice or _EDGE_DEFAULT_VOICE
+    voice = _EDGE_EMOTION_VOICES.get(emotion, default_voice) if emotion else default_voice
+
+    rate_pct = runtime.edge_base_rate_pct
+    pitch = "+0Hz"
+    if emotion in ("excited", "joyful", "delighted", "surprised"):
+        rate_pct += 10
+        pitch = "+3Hz"
+    elif emotion in ("sad", "depressed", "sympathetic"):
+        rate_pct -= 10
+        pitch = "-2Hz"
+    elif emotion in ("whispering", "scared", "nervous"):
+        rate_pct -= 15
+        pitch = "-3Hz"
+    elif emotion in ("angry", "frustrated", "upset"):
+        rate_pct += 8
+        pitch = "+2Hz"
+
+    rate_pct = max(-40, min(60, rate_pct))
+    rate = f"{rate_pct:+d}%"
+
+    try:
+        communicate = edge_tts.Communicate(clean_text, voice=voice, rate=rate, pitch=pitch)
+        audio_data = io.BytesIO()
+        async for chunk in communicate.stream():
+            if chunk["type"] == "audio":
+                audio_data.write(chunk["data"])
+
+        mp3_bytes = audio_data.getvalue()
+        logger.info(
+            "[tts] /synthesize %d bytes | voice=%s | emotion=%s | rate=%s",
+            len(mp3_bytes), voice, emotion, rate,
+        )
+        return FastAPIResponse(content=mp3_bytes, media_type="audio/mpeg")
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.error("Edge TTS synthesize failed: %s", exc)
+        raise HTTPException(status_code=502, detail=f"Edge TTS failed: {exc}") from exc
 
 
 @app.post("/speak", response_model=SpeakResponse)

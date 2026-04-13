@@ -1,0 +1,536 @@
+<!DOCTYPE html>
+
+<html class="dark" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>Ethereal AI - Astra Core</title>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@200;400;600;800&amp;family=Inter:wght@300;400;500&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<script id="tailwind-config">
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    "colors": {
+                        "secondary": "#ac8aff",
+                        "on-tertiary": "#3d0047",
+                        "on-secondary-fixed-variant": "#5f28c8",
+                        "on-tertiary-fixed": "#300038",
+                        "surface-container-highest": "#262627",
+                        "on-tertiary-fixed-variant": "#660075",
+                        "on-error-container": "#ffb2b9",
+                        "surface-dim": "#0e0e0f",
+                        "primary-container": "#00f1fe",
+                        "tertiary-fixed-dim": "#ef6eff",
+                        "outline-variant": "#484849",
+                        "surface-container-low": "#131314",
+                        "on-secondary-fixed": "#40009b",
+                        "tertiary-container": "#de4bf4",
+                        "on-surface-variant": "#adaaab",
+                        "on-primary-fixed-variant": "#006065",
+                        "on-primary": "#005f64",
+                        "surface-tint": "#99f7ff",
+                        "secondary-dim": "#8455ef",
+                        "surface-bright": "#2c2c2d",
+                        "on-tertiary-container": "#19001e",
+                        "tertiary": "#ec63ff",
+                        "error": "#ff6e84",
+                        "primary-fixed": "#00f1fe",
+                        "surface-container": "#1a191b",
+                        "secondary-fixed": "#dac9ff",
+                        "outline": "#767576",
+                        "on-primary-container": "#00555a",
+                        "inverse-surface": "#fcf8f9",
+                        "secondary-fixed-dim": "#ceb9ff",
+                        "error-dim": "#d73357",
+                        "on-surface": "#ffffff",
+                        "on-secondary": "#280067",
+                        "inverse-primary": "#006a70",
+                        "surface": "#0e0e0f",
+                        "on-secondary-container": "#d9c8ff",
+                        "primary": "#99f7ff",
+                        "secondary-container": "#5516be",
+                        "primary-dim": "#00e2ee",
+                        "inverse-on-surface": "#565556",
+                        "tertiary-fixed": "#f487ff",
+                        "primary-fixed-dim": "#00e2ee",
+                        "on-background": "#ffffff",
+                        "surface-container-high": "#201f21",
+                        "on-primary-fixed": "#004145",
+                        "error-container": "#a70138",
+                        "background": "#0e0e0f",
+                        "surface-container-lowest": "#000000",
+                        "surface-variant": "#262627",
+                        "on-error": "#490013",
+                        "tertiary-dim": "#ec63ff"
+                    },
+                    "borderRadius": {
+                        "DEFAULT": "0.25rem",
+                        "lg": "0.5rem",
+                        "xl": "1.5rem",
+                        "full": "9999px"
+                    },
+                    "fontFamily": {
+                        "headline": ["Manrope"],
+                        "body": ["Inter"],
+                        "label": ["Inter"]
+                    }
+                },
+            },
+        }
+    </script>
+<style>
+        body { font-family: 'Inter', sans-serif; }
+        h1, h2, h3 { font-family: 'Manrope', sans-serif; }
+        .orb-gradient {
+            background: radial-gradient(circle at 30% 30%, #99f7ff 0%, #ac8aff 45%, #ec63ff 100%);
+        }
+        .energy-halo {
+            background: radial-gradient(circle, rgba(153, 247, 255, 0.1) 0%, rgba(236, 99, 255, 0.05) 50%, transparent 70%);
+        }
+        .glass-panel {
+            background: rgba(44, 44, 45, 0.4);
+            backdrop-filter: blur(20px);
+        }
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+        }
+
+        /* Animated Background Waves */
+        .wave-container {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            z-index: 0;
+            opacity: 0.3;
+        }
+        .wave {
+            position: absolute;
+            left: -100%;
+            width: 300%;
+            height: 100%;
+            background-repeat: repeat-x;
+            transform-origin: center bottom;
+        }
+        .wave-1 {
+            animation: move-wave 20s linear infinite;
+            opacity: 0.2;
+        }
+        .wave-2 {
+            animation: move-wave 15s linear infinite reverse;
+            opacity: 0.15;
+            top: 5%;
+        }
+        @keyframes move-wave {
+            0% { transform: translateX(0) translateZ(0) scaleY(1); }
+            50% { transform: translateX(25%) translateZ(0) scaleY(0.8); }
+            100% { transform: translateX(50%) translateZ(0) scaleY(1); }
+        }
+
+        /* Speaking Mouth Animation */
+        .orb-mouth {
+            width: 24px;
+            height: 4px;
+            background: #99f7ff;
+            border-radius: 99px;
+            box-shadow: 0 0-10px #00f1fe;
+            transition: all 0.2s ease;
+        }
+        /* Only pulse when "speaking" or active */
+        .is-speaking .orb-mouth {
+            animation: speaking 0.4s ease-in-out infinite alternate;
+        }
+        @keyframes speaking {
+            from { height: 2px; width: 12px; opacity: 0.6; }
+            to { height: 8px; width: 16px; opacity: 1; border-radius: 4px; }
+        }
+    
+        /* Blink Animation */
+        @keyframes eye-blink {
+            0%, 90%, 100% { transform: scaleY(1); }
+            95% { transform: scaleY(0); }
+        }
+        .animate-blink {
+            animation: eye-blink 4s infinite;
+        }
+
+        /* Cheerful Particles */
+        @keyframes particle-float {
+            0% { transform: translateY(0) scale(0) rotate(0deg); opacity: 0; }
+            20% { opacity: 0.8; }
+            80% { opacity: 0.4; }
+            100% { transform: translateY(-100px) scale(1.5) rotate(45deg); opacity: 0; }
+        }
+        .cheerful-particle {
+            position: absolute;
+            pointer-events: none;
+            animation: particle-float 3s ease-out infinite;
+        }
+
+        /* Astra Perspective Rotation */
+        #astra-container {
+            transition: transform 0.1s ease-out;
+            perspective: 1000px;
+        }
+        #astra-orb {
+            transition: transform 0.1s ease-out;
+            transform-style: preserve-3d;
+        }
+        #astra-face {
+            transition: transform 0.1s ease-out;
+        }
+
+        /* Listening State Waves Overlay (Moved to bottom) */
+        #listening-canvas {
+            position: absolute;
+            bottom: 0;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 15;
+            pointer-events: none;
+            width: 100vw;
+            height: 240px;
+        }
+    </style>
+</head>
+<body class="bg-surface text-on-surface min-h-screen overflow-hidden selection:bg-primary/30">
+<!-- TopNavBar -->
+<header class="flex justify-between items-center px-8 py-6 w-full fixed top-0 z-50 bg-transparent">
+<div class="text-xl font-bold tracking-tighter text-white font-manrope">Ethereal AI</div>
+<nav class="hidden md:flex items-center gap-8 text-sm font-manrope tracking-tight">
+<a class="text-white font-semibold hover:text-indigo-300 transition-colors" href="#">Astra</a>
+<a class="text-zinc-500 hover:text-indigo-300 transition-colors" href="#">Manifest</a>
+<a class="text-zinc-500 hover:text-indigo-300 transition-colors" href="#">Archive</a>
+</nav>
+<div class="flex items-center gap-4">
+<button class="text-zinc-500 hover:text-indigo-300 transition-colors">
+<span class="material-symbols-outlined">history</span>
+</button>
+<button class="text-zinc-500 hover:text-indigo-300 transition-colors">
+<span class="material-symbols-outlined">settings</span>
+</button>
+<div class="w-8 h-8 rounded-full overflow-hidden bg-surface-container-highest">
+<img alt="User profile" class="w-full h-full object-cover" src="https://lh3.googleusercontent.com/aida-public/AB6AXuCVuSrXba7Q1F6ClOedQss2Tr3Wfz5Y9Tq7ozqhMVKb45io_UO8y6yDJnc96LUivzA4ANftcrm_wxT7YAv728sTM9-91-VZ_X5hsRuYyvWtPMiTdK-7egJq4WEgENAkS8FeSBswhaNgAcYXJYpPPR6P9nwzqD9nik10j6rWgxtGtohYZmpYUDswwgFeBkvXntfTrnvUf-fSbWADQ5CFjuAE_3F2TgJ1IjrjpBt97ysFjTNJeDvpMhzJn62nQ_Uc5q2YSn8-vhLu5eg4"/>
+</div>
+</div>
+</header>
+<!-- SideNavBar (Desktop Only) -->
+<aside class="fixed left-0 top-0 h-full flex flex-col items-center py-12 z-40 hidden md:flex bg-zinc-950/40 backdrop-blur-xl h-screen w-20 rounded-r-3xl shadow-[0_0_40px_rgba(99,102,241,0.08)]">
+<div class="flex flex-col items-center gap-1 mb-12">
+<div class="w-10 h-10 rounded-xl bg-primary/20 flex items-center justify-center mb-2">
+<span class="material-symbols-outlined text-primary">bubble_chart</span>
+</div>
+</div>
+<nav class="flex flex-col gap-8 flex-1">
+<button class="text-indigo-400 scale-110 flex flex-col items-center gap-1 group">
+<span class="material-symbols-outlined">bubble_chart</span>
+<span class="font-manrope text-[8px] uppercase tracking-widest opacity-0 group-hover:opacity-100 transition-opacity">Presence</span>
+</button>
+<button class="text-zinc-600 hover:text-zinc-300 transition-all flex flex-col items-center gap-1 group">
+<span class="material-symbols-outlined">database</span>
+<span class="font-manrope text-[8px] uppercase tracking-widest opacity-0 group-hover:opacity-100 transition-opacity">Memory</span>
+</button>
+<button class="text-zinc-600 hover:text-zinc-300 transition-all flex flex-col items-center gap-1 group">
+<span class="material-symbols-outlined">psychology</span>
+<span class="font-manrope text-[8px] uppercase tracking-widest opacity-0 group-hover:opacity-100 transition-opacity">Synthesis</span>
+</button>
+<button class="text-zinc-600 hover:text-zinc-300 transition-all flex flex-col items-center gap-1 group">
+<span class="material-symbols-outlined">query_stats</span>
+<span class="font-manrope text-[8px] uppercase tracking-widest opacity-0 group-hover:opacity-100 transition-opacity">Vitals</span>
+</button>
+</nav>
+</aside>
+<!-- Main Content Canvas -->
+<main class="relative h-screen w-full flex flex-col items-center p-6 bg-surface overflow-hidden">
+<!-- Environment Background Layer -->
+<div class="absolute inset-0 z-0 pointer-events-none">
+<!-- Wave Background -->
+<div class="wave-container">
+<svg class="wave wave-1" preserveaspectratio="none" viewbox="0 0 1440 320" xmlns="http://www.w3.org/2000/svg">
+<path d="M0,192L48,197.3C96,203,192,213,288,229.3C384,245,480,267,576,250.7C672,235,768,181,864,181.3C960,181,1056,235,1152,234.7C1248,235,1344,181,1392,154.7L1440,128L1440,320L1392,320C1344,320,1248,320,1152,320C1056,320,960,320,864,320C768,320,672,320,576,320C480,320,384,320,288,320C192,320,96,320,48,320L0,320Z" fill="#99f7ff" fill-opacity="0.1"></path>
+</svg>
+<svg class="wave wave-2" preserveaspectratio="none" viewbox="0 0 1440 320" xmlns="http://www.w3.org/2000/svg">
+<path d="M0,64L48,80C96,96,192,128,288,128C384,128,480,96,576,106.7C672,117,768,171,864,176C960,181,1056,139,1152,122.7C1248,107,1344,117,1392,122.7L1440,128L1440,320L1392,320C1344,320,1248,320,1152,320C1056,320,960,320,864,320C768,320,672,320,576,320C480,320,384,320,288,320C192,320,96,320,48,320L0,320Z" fill="#ec63ff" fill-opacity="0.1"></path>
+</svg>
+</div>
+<div class="absolute top-1/4 left-1/4 w-96 h-96 bg-primary/5 rounded-full blur-[120px]"></div>
+<div class="absolute bottom-1/4 right-1/4 w-[500px] h-[500px] bg-tertiary/5 rounded-full blur-[150px]"></div>
+<!-- Dust Particles Simulation (Aesthetic Overlay) -->
+<div class="absolute inset-0 bg-[url('https://www.transparenttextures.com/patterns/stardust.png')] opacity-10 mix-blend-screen"></div>
+</div>
+<!-- Central Character Stage (Positioned higher) -->
+<div class="relative z-10 flex flex-col items-center bg-transparent mt-24 md:mt-32" id="astra-container">
+<!-- Aura & Halo -->
+<div class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[450px] h-[450px] energy-halo rounded-full animate-pulse opacity-60"></div>
+<!-- The Core Orb -->
+<div class="relative group cursor-pointer bg-transparent" id="astra-orb">
+<div class="w-64 h-64 rounded-full orb-gradient relative z-20 shadow-[0_0_80px_rgba(153,247,255,0.2)] transition-all duration-700 group-hover:shadow-[0_0_120px_rgba(236,99,255,0.4)] group-hover:scale-105 flex flex-col items-center justify-center">
+<!-- Glass Shine -->
+<div class="absolute inset-0 bg-gradient-to-tr from-white/20 to-transparent opacity-40"></div>
+<!-- Astra Face Group for Gaze -->
+<div class="flex flex-col items-center justify-center" id="astra-face">
+<!-- Cyan Glowing Eyes - Vertical, wider spacing -->
+<div class="flex relative z-30 transition-transform duration-300 translate-y-1 gap-12">
+<div class="w-3 h-8 bg-primary-container rounded-full shadow-[0_0_15px_#00f1fe] animate-pulse animate-blink"></div>
+<div class="w-3 h-8 bg-primary-container rounded-full shadow-[0_0_15px_#00f1fe] animate-pulse animate-blink"></div>
+</div>
+<!-- Speaking State: Minimal Mouth -->
+<div class="mt-8 relative z-30">
+<div class="orb-mouth"></div>
+</div>
+</div>
+<!-- Inner Refraction Elements -->
+<div class="absolute -bottom-10 -right-10 w-40 h-40 bg-white/10 blur-2xl rounded-full"></div>
+<div class="absolute inset-0 z-40">
+<span class="cheerful-particle material-symbols-outlined text-primary text-[10px]" style="top: 20%; left: 20%; animation-delay: 0s;">star</span>
+<span class="cheerful-particle material-symbols-outlined text-secondary text-[8px]" style="top: 30%; left: 70%; animation-delay: 1s;">favorite</span>
+<span class="cheerful-particle material-symbols-outlined text-tertiary text-[12px]" style="top: 60%; left: 80%; animation-delay: 2s;">star</span>
+<span class="cheerful-particle material-symbols-outlined text-primary text-[8px]" style="top: 70%; left: 15%; animation-delay: 0.5s;">favorite</span>
+</div>
+</div>
+<!-- Floor Shadow/Reflection -->
+<div class="mt-16 w-32 h-4 bg-zinc-950/60 blur-xl rounded-full scale-x-150 mx-auto opacity-50"></div>
+</div>
+<!-- Character Title & Status -->
+<div class="mt-12 text-center">
+<h1 class="text-5xl md:text-7xl font-extrabold tracking-tighter text-white mb-2">Astra</h1>
+<div class="flex items-center justify-center gap-3">
+<span class="w-1.5 h-1.5 rounded-full bg-primary animate-ping"></span>
+<p class="text-on-surface-variant font-label tracking-[0.2em] uppercase text-xs">Consciousness active</p>
+</div>
+</div>
+</div>
+<!-- Floating UI Widgets (Adjusted positions) -->
+<div class="absolute inset-0 pointer-events-none flex items-center justify-center">
+<!-- Sentiment Gauge -->
+<div class="absolute left-10 md:left-40 top-1/2 -translate-y-1/2 pointer-events-auto hidden lg:block">
+<div class="glass-panel p-6 rounded-xl border border-white/5 w-48 shadow-2xl">
+<p class="text-[10px] text-zinc-500 uppercase tracking-widest mb-4">Neural Harmony</p>
+<div class="h-1 w-full bg-surface-container-highest rounded-full overflow-hidden">
+<div class="h-full w-4/5 bg-gradient-to-r from-primary to-secondary"></div>
+</div>
+<div class="flex justify-between mt-2">
+<span class="text-[10px] text-primary">88%</span>
+<span class="text-[10px] text-zinc-400">Optimal</span>
+</div>
+</div>
+</div>
+<!-- Active Protocol -->
+<div class="absolute right-10 md:right-40 top-1/2 -translate-y-1/2 pointer-events-auto hidden lg:block">
+<div class="glass-panel p-6 rounded-xl border border-white/5 w-56 shadow-2xl">
+<div class="flex items-center gap-3 mb-3">
+<span class="material-symbols-outlined text-secondary text-lg">auto_awesome</span>
+<p class="text-[10px] text-zinc-400 uppercase tracking-widest">Synthesis Mode</p>
+</div>
+<h3 class="text-lg font-manrope text-white font-semibold leading-tight">Abstract Reality Reconstruction</h3>
+</div>
+</div>
+</div>
+<!-- Listening Multi-Frequency Waves (Now at bottom, centered) -->
+<canvas id="listening-canvas"></canvas>
+<!-- Bottom Controls -->
+<div class="fixed bottom-0 left-1/2 -translate-x-1/2 w-full px-4 pb-8 flex flex-col items-center z-50 md:max-w-xl">
+<!-- Interaction Bar -->
+<div class="bg-zinc-950/20 backdrop-blur-md rounded-full px-8 py-4 flex items-center gap-8 shadow-2xl shadow-indigo-500/10 border border-white/5">
+<button class="flex flex-col items-center justify-center text-zinc-500 hover:text-white transition-colors">
+<span class="material-symbols-outlined">terminal</span>
+</button>
+<button class="group relative" id="mic-trigger">
+<div class="absolute -inset-4 bg-primary/20 rounded-full blur-xl group-hover:bg-primary/40 transition-all"></div>
+<div class="w-16 h-16 rounded-full bg-gradient-to-br from-secondary to-primary flex items-center justify-center relative z-10 shadow-lg shadow-primary/20 group-active:scale-95 transition-transform">
+<span class="material-symbols-outlined text-on-primary text-3xl" style="font-variation-settings: 'FILL' 1;">mic</span>
+</div>
+</button>
+<button class="flex flex-col items-center justify-center text-zinc-500 hover:text-white transition-colors">
+<span class="material-symbols-outlined">flare</span>
+</button>
+</div>
+</div>
+<!-- Background Image Texture -->
+<canvas class="fixed inset-0 -z-10 w-full h-full pointer-events-none" id="waveformCanvas"></canvas>
+</main>
+<!-- BottomNavBar (Mobile Only) -->
+<nav class="md:hidden fixed bottom-0 left-1/2 -translate-x-1/2 w-full px-4 pb-8 flex justify-around items-center z-50">
+<div class="flex items-center justify-around w-full max-w-md mx-auto mb-6 bg-zinc-950/20 backdrop-blur-md rounded-t-[2.5rem] py-4">
+<div class="flex flex-col items-center justify-center text-zinc-500">
+<span class="material-symbols-outlined">mic</span>
+<span class="font-manrope font-medium text-[10px]">Listen</span>
+</div>
+<div class="flex flex-col items-center justify-center bg-indigo-500/20 text-indigo-200 rounded-full w-14 h-14">
+<span class="material-symbols-outlined" style="font-variation-settings: 'FILL' 1;">flare</span>
+<span class="font-manrope font-medium text-[10px]">Think</span>
+</div>
+<div class="flex flex-col items-center justify-center text-zinc-500">
+<span class="material-symbols-outlined">terminal</span>
+<span class="font-manrope font-medium text-[10px]">Command</span>
+</div>
+</div>
+</nav>
+<script>
+        // Canvas Waveform Logic (Bottom Decorative Waves)
+        const canvas = document.getElementById('waveformCanvas');
+        const ctx = canvas.getContext('2d');
+        let width, height;
+
+        function resize() {
+            width = canvas.width = window.innerWidth;
+            height = canvas.height = window.innerHeight;
+        }
+        window.addEventListener('resize', resize);
+        resize();
+
+        class Wave {
+            constructor(frequency, amplitude, speed, opacity, offset, color) {
+                this.frequency = frequency;
+                this.amplitude = amplitude;
+                this.speed = speed;
+                this.opacity = opacity;
+                this.offset = offset;
+                this.color = color || '99, 102, 241';
+                this.phase = 0;
+            }
+            draw(context, canvasWidth, canvasHeight, anchorFactor = 1, isCentered = false) {
+                context.beginPath();
+                context.lineWidth = 1.5;
+                context.strokeStyle = `rgba(${this.color}, ${this.opacity})`;
+                for (let x = 0; x <= canvasWidth; x += 2) {
+                    const normalizedX = (x / canvasWidth) * 2 - 1;
+                    
+                    // Anchoring logic: if centered, active in middle, flat at sides. 
+                    // If isCentered is true, we use cos^2 for peak in middle.
+                    const anchoring = isCentered ? Math.pow(Math.cos(normalizedX * Math.PI / 2), 4) : Math.pow(Math.cos(normalizedX * Math.PI / 2), anchorFactor);
+                    
+                    const y = (canvasHeight / 2) + 
+                              (Math.sin(x * this.frequency + this.phase + this.offset) * this.amplitude * anchoring) - 
+                              (Math.cos(x * this.frequency * 0.5 + this.phase) * (this.amplitude * 0.5) * anchoring);
+                    if (x === 0) context.moveTo(x, y);
+                    else context.lineTo(x, y);
+                }
+                context.stroke();
+                this.phase += this.speed;
+            }
+        }
+
+        const bottomWaves = [
+            new Wave(0.005, 60, 0.02, 0.3, 0),
+            new Wave(0.008, 40, -0.015, 0.15, Math.PI / 4),
+            new Wave(0.012, 25, 0.03, 0.1, Math.PI / 2)
+        ];
+
+        // Listening Canvas Logic (Bottom interactive Waves)
+        const listeningCanvas = document.getElementById('listening-canvas');
+        const lCtx = listeningCanvas.getContext('2d');
+        function resizeListening() {
+            listeningCanvas.width = window.innerWidth;
+            listeningCanvas.height = 240;
+        }
+        window.addEventListener('resize', resizeListening);
+        resizeListening();
+
+        const synthWaves = [
+            new Wave(0.01, 70, 0.05, 0.6, 0, '153, 247, 255'), // Primary Cyan
+            new Wave(0.015, 55, 0.04, 0.4, Math.PI/3, '172, 138, 255'), // Secondary Purple
+            new Wave(0.008, 80, 0.03, 0.3, Math.PI/1.5, '236, 99, 255'), // Tertiary Pink
+            new Wave(0.02, 45, 0.06, 0.2, Math.PI, '0, 241, 254') // Primary Container
+        ];
+
+        // Toggle state for demonstration
+        let isSpeaking = false;
+        const micBtn = document.getElementById('mic-trigger');
+        const astraContainer = document.getElementById('astra-container');
+        
+        micBtn.addEventListener('click', () => {
+            isSpeaking = !isSpeaking;
+            if(isSpeaking) astraContainer.classList.add('is-speaking');
+            else astraContainer.classList.remove('is-speaking');
+        });
+
+        // Cursor Tracking Logic
+        const orb = document.getElementById('astra-orb');
+        const container = document.getElementById('astra-container');
+        const face = document.getElementById('astra-face');
+        let mouseX = window.innerWidth / 2;
+        let mouseY = window.innerHeight / 2;
+
+        window.addEventListener('mousemove', (e) => {
+            mouseX = e.clientX;
+            mouseY = e.clientY;
+        });
+
+        function updateAstraGaze() {
+            const rect = container.getBoundingClientRect();
+            const centerX = rect.left + rect.width / 2;
+            const centerY = rect.top + rect.height / 2;
+            
+            const deltaX = (mouseX - centerX) / window.innerWidth;
+            const deltaY = (mouseY - centerY) / window.innerHeight;
+            
+            // Rotate the whole container slightly for depth
+            container.style.transform = `rotateY(${deltaX * 15}deg) rotateX(${-deltaY * 15}deg)`;
+            
+            // Move the face more for the "gazing" effect
+            face.style.transform = `translateX(${deltaX * 40}px) translateY(${deltaY * 40}px)`;
+            
+            // Subtle shadow shift
+            orb.style.boxShadow = `${-deltaX * 30}px ${-deltaY * 30}px 80px rgba(153,247,255,0.2)`;
+        }
+
+        function animate() {
+            // Background decor waves
+            ctx.clearRect(0, 0, width, height);
+            bottomWaves.forEach(wave => {
+                ctx.save();
+                ctx.translate(0, height - 40);
+                wave.draw(ctx, width, 80, 0.5);
+                ctx.restore();
+            });
+
+            // Bottom Interactive Visualizer Waves (Horizontal around Mic)
+            lCtx.clearRect(0, 0, listeningCanvas.width, listeningCanvas.height);
+            synthWaves.forEach(wave => {
+                // If speaking, boost amplitude
+                const targetAmp = isSpeaking ? wave.amplitude * 1.5 : wave.amplitude;
+                const currentAmp = wave.currentAmplitude || targetAmp;
+                wave.currentAmplitude = currentAmp + (targetAmp - currentAmp) * 0.1;
+                
+                const tempWave = {...wave, amplitude: wave.currentAmplitude};
+                
+                lCtx.save();
+                // Position at the bottom of the canvas, which is at the bottom of the screen
+                lCtx.translate(0, listeningCanvas.height - 80); 
+                // Draw as centered visualizer
+                drawCenteredWave(lCtx, listeningCanvas.width, 160, tempWave);
+                lCtx.restore();
+                
+                wave.phase += wave.speed;
+            });
+
+            updateAstraGaze();
+            requestAnimationFrame(animate);
+        }
+
+        function drawCenteredWave(context, canvasWidth, canvasHeight, wave) {
+            context.beginPath();
+            context.lineWidth = 2;
+            context.strokeStyle = `rgba(${wave.color}, ${wave.opacity})`;
+            
+            for (let x = 0; x <= canvasWidth; x += 4) {
+                const normalizedX = (x / canvasWidth) * 2 - 1; 
+                // Bell curve anchoring - focused in center
+                const anchoring = Math.pow(Math.cos(normalizedX * Math.PI / 2), 6);
+                
+                const y = (canvasHeight / 2) + 
+                          (Math.sin(x * wave.frequency + wave.phase + wave.offset) * wave.amplitude * anchoring) +
+                          (Math.cos(x * wave.frequency * 0.7 + wave.phase) * (wave.amplitude * 0.4) * anchoring);
+                
+                if (x === 0) context.moveTo(x, y);
+                else context.lineTo(x, y);
+            }
+            context.stroke();
+        }
+
+        animate();
+    </script>
+</body></html>

@@ -1,6 +1,7 @@
 Param(
     [switch]$ServicesOnly,
-    [switch]$ShowTtsLogs
+    [switch]$ShowTtsLogs,
+    [switch]$UseDevManager
 )
 
 function Wait-HttpHealthy {
@@ -37,7 +38,8 @@ function Ensure-Service {
         [string]$PythonPath,
         [string[]]$ProcessArgs,
         [int]$TimeoutSeconds = 120,
-        [string]$WindowStyle = "Minimized"
+        [string]$WindowStyle = "Minimized",
+        [string]$WorkingDirectory
     )
 
     try {
@@ -56,7 +58,15 @@ function Ensure-Service {
         Write-Host "ERROR: No process arguments provided for $Name"
         return $false
     }
-    Start-Process -FilePath $PythonPath -ArgumentList $ProcessArgs -WindowStyle $WindowStyle
+    $startParams = @{
+        FilePath     = $PythonPath
+        ArgumentList = $ProcessArgs
+        WindowStyle  = $WindowStyle
+    }
+    if ($WorkingDirectory) {
+        $startParams.WorkingDirectory = $WorkingDirectory
+    }
+    Start-Process @startParams
     return Wait-HttpHealthy -Name $Name -Url $HealthUrl -TimeoutSeconds $TimeoutSeconds
 }
 
@@ -106,11 +116,26 @@ if (-not $ollamaOk) {
     return
 }
 
-$whisperOk = Ensure-Service -Name "whisper" -HealthUrl "http://127.0.0.1:8001/health" -PythonPath $python -ProcessArgs @("-m", "uvicorn", "services.whisper_service:app", "--host", "127.0.0.1", "--port", "8001") -TimeoutSeconds 180
-$llmOk = Ensure-Service -Name "llm" -HealthUrl "http://127.0.0.1:8002/health" -PythonPath $python -ProcessArgs @("-m", "uvicorn", "services.llm_service:app", "--host", "127.0.0.1", "--port", "8002") -TimeoutSeconds 180
-$ttsWindow = if ($ShowTtsLogs) { "Normal" } else { "Minimized" }
-$ttsOk = Ensure-Service -Name "tts" -HealthUrl "http://127.0.0.1:8003/health" -PythonPath $python -ProcessArgs @("-m", "uvicorn", "services.tts_service:app", "--host", "127.0.0.1", "--port", "8003") -TimeoutSeconds 120 -WindowStyle $ttsWindow
-$intentOk = Ensure-Service -Name "intent" -HealthUrl "http://127.0.0.1:8004/health" -PythonPath $python -ProcessArgs @("-m", "uvicorn", "services.intent_service:app", "--host", "127.0.0.1", "--port", "8004") -TimeoutSeconds 120
+if ($UseDevManager) {
+    $devManagerOk = Ensure-Service -Name "dev-manager" -HealthUrl "http://127.0.0.1:3900/health" -PythonPath $python -ProcessArgs @("-m", "uvicorn", "services.dev_manager:app", "--host", "127.0.0.1", "--port", "3900") -TimeoutSeconds 120 -WorkingDirectory $root
+    if (-not $devManagerOk) {
+        Write-Host "dev-manager is not ready."
+        Pop-Location
+        return
+    }
+
+    $whisperOk = Wait-HttpHealthy -Name "whisper" -Url "http://127.0.0.1:8001/health" -TimeoutSeconds 180
+    $llmOk = Wait-HttpHealthy -Name "llm" -Url "http://127.0.0.1:8002/health" -TimeoutSeconds 180
+    $ttsOk = Wait-HttpHealthy -Name "tts" -Url "http://127.0.0.1:8003/health" -TimeoutSeconds 120
+    $intentOk = Wait-HttpHealthy -Name "intent" -Url "http://127.0.0.1:8004/health" -TimeoutSeconds 120
+}
+else {
+    $whisperOk = Ensure-Service -Name "whisper" -HealthUrl "http://127.0.0.1:8001/health" -PythonPath $python -ProcessArgs @("-m", "uvicorn", "services.whisper_service:app", "--host", "127.0.0.1", "--port", "8001") -TimeoutSeconds 180
+    $llmOk = Ensure-Service -Name "llm" -HealthUrl "http://127.0.0.1:8002/health" -PythonPath $python -ProcessArgs @("-m", "uvicorn", "services.llm_service:app", "--host", "127.0.0.1", "--port", "8002") -TimeoutSeconds 180
+    $ttsWindow = if ($ShowTtsLogs) { "Normal" } else { "Minimized" }
+    $ttsOk = Ensure-Service -Name "tts" -HealthUrl "http://127.0.0.1:8003/health" -PythonPath $python -ProcessArgs @("-m", "uvicorn", "services.tts_service:app", "--host", "127.0.0.1", "--port", "8003") -TimeoutSeconds 120 -WindowStyle $ttsWindow
+    $intentOk = Ensure-Service -Name "intent" -HealthUrl "http://127.0.0.1:8004/health" -PythonPath $python -ProcessArgs @("-m", "uvicorn", "services.intent_service:app", "--host", "127.0.0.1", "--port", "8004") -TimeoutSeconds 120
+}
 
 if (-not ($whisperOk -and $llmOk -and $ttsOk -and $intentOk)) {
     Write-Host "One or more services are not ready."

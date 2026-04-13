@@ -12,6 +12,7 @@ from typing import Any
 import psutil
 import requests
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 LOCAL_PYTHON = ROOT_DIR / "venv" / "python.exe"
@@ -296,6 +297,14 @@ class ServiceManager:
 
 manager = ServiceManager()
 app = FastAPI(title="Voice2 Dev Manager", version="1.0.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.on_event("startup")

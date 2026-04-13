@@ -1,0 +1,187 @@
+@import "tailwindcss";
+
+@theme {
+  --color-secondary: #ac8aff;
+  --color-on-tertiary: #3d0047;
+  --color-on-secondary-fixed-variant: #5f28c8;
+  --color-on-tertiary-fixed: #300038;
+  --color-surface-container-highest: #262627;
+  --color-on-tertiary-fixed-variant: #660075;
+  --color-on-error-container: #ffb2b9;
+  --color-surface-dim: #0e0e0f;
+  --color-primary-container: #00f1fe;
+  --color-tertiary-fixed-dim: #ef6eff;
+  --color-outline-variant: #484849;
+  --color-surface-container-low: #131314;
+  --color-on-secondary-fixed: #40009b;
+  --color-tertiary-container: #de4bf4;
+  --color-on-surface-variant: #adaaab;
+  --color-on-primary-fixed-variant: #006065;
+  --color-on-primary: #005f64;
+  --color-surface-tint: #99f7ff;
+  --color-secondary-dim: #8455ef;
+  --color-surface-bright: #2c2c2d;
+  --color-on-tertiary-container: #19001e;
+  --color-tertiary: #ec63ff;
+  --color-error: #ff6e84;
+  --color-primary-fixed: #00f1fe;
+  --color-surface-container: #1a191b;
+  --color-secondary-fixed: #dac9ff;
+  --color-outline: #767576;
+  --color-on-primary-container: #00555a;
+  --color-inverse-surface: #fcf8f9;
+  --color-secondary-fixed-dim: #ceb9ff;
+  --color-error-dim: #d73357;
+  --color-on-surface: #ffffff;
+  --color-on-secondary: #280067;
+  --color-inverse-primary: #006a70;
+  --color-surface: #0e0e0f;
+  --color-on-secondary-container: #d9c8ff;
+  --color-primary: #99f7ff;
+  --color-secondary-container: #5516be;
+  --color-primary-dim: #00e2ee;
+  --color-inverse-on-surface: #565556;
+  --color-tertiary-fixed: #f487ff;
+  --color-primary-fixed-dim: #00e2ee;
+  --color-on-background: #ffffff;
+  --color-surface-container-high: #201f21;
+  --color-on-primary-fixed: #004145;
+  --color-error-container: #a70138;
+  --color-background: #0e0e0f;
+  --color-surface-container-lowest: #000000;
+  --color-surface-variant: #262627;
+  --color-on-error: #490013;
+  --color-tertiary-dim: #ec63ff;
+
+  --font-headline: "Manrope", sans-serif;
+  --font-body: "Inter", sans-serif;
+  --font-label: "Inter", sans-serif;
+  --font-manrope: "Manrope", sans-serif;
+}
+
+@layer utilities {
+  .glass {
+    @apply bg-white/10 backdrop-blur-md border border-white/20;
+  }
+}
+
+body {
+  font-family: 'Inter', sans-serif;
+  margin: 0;
+  padding: 0;
+  background-color: var(--color-surface);
+  color: var(--color-on-surface);
+}
+
+h1, h2, h3 { font-family: 'Manrope', sans-serif; }
+
+.orb-gradient {
+    background: radial-gradient(circle at 30% 30%, #99f7ff 0%, #ac8aff 45%, #ec63ff 100%);
+}
+.energy-halo {
+    background: radial-gradient(circle, rgba(153, 247, 255, 0.1) 0%, rgba(236, 99, 255, 0.05) 50%, transparent 70%);
+}
+.glass-panel {
+    background: rgba(44, 44, 45, 0.4);
+    backdrop-filter: blur(20px);
+}
+.material-symbols-outlined {
+    font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+}
+
+/* Animated Background Waves */
+.wave-container {
+    position: absolute;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    z-index: 0;
+    opacity: 0.3;
+}
+.wave {
+    position: absolute;
+    left: -100%;
+    width: 300%;
+    height: 100%;
+    background-repeat: repeat-x;
+    transform-origin: center bottom;
+}
+.wave-1 {
+    animation: move-wave 20s linear infinite;
+    opacity: 0.2;
+}
+.wave-2 {
+    animation: move-wave 15s linear infinite reverse;
+    opacity: 0.15;
+    top: 5%;
+}
+@keyframes move-wave {
+    0% { transform: translateX(0) translateZ(0) scaleY(1); }
+    50% { transform: translateX(25%) translateZ(0) scaleY(0.8); }
+    100% { transform: translateX(50%) translateZ(0) scaleY(1); }
+}
+
+/* Speaking Mouth Animation */
+.orb-mouth {
+    width: 24px;
+    height: 4px;
+    background: #99f7ff;
+    border-radius: 99px;
+    box-shadow: 0 0 10px #00f1fe;
+    transition: all 0.2s ease;
+}
+/* Only pulse when "speaking" or active */
+.is-speaking .orb-mouth {
+    animation: speaking 0.4s ease-in-out infinite alternate;
+}
+@keyframes speaking {
+    from { height: 2px; width: 12px; opacity: 0.6; }
+    to { height: 8px; width: 16px; opacity: 1; border-radius: 4px; }
+}
+
+/* Blink Animation */
+@keyframes eye-blink {
+    0%, 90%, 100% { transform: scaleY(1); }
+    95% { transform: scaleY(0); }
+}
+.animate-blink {
+    animation: eye-blink 4s infinite;
+}
+
+/* Cheerful Particles */
+@keyframes particle-float {
+    0% { transform: translateY(0) scale(0) rotate(0deg); opacity: 0; }
+    20% { opacity: 0.8; }
+    80% { opacity: 0.4; }
+    100% { transform: translateY(-100px) scale(1.5) rotate(45deg); opacity: 0; }
+}
+.cheerful-particle {
+    position: absolute;
+    pointer-events: none;
+    animation: particle-float 3s ease-out infinite;
+}
+
+/* Astra Perspective Rotation */
+#astra-container {
+    transition: transform 0.1s ease-out;
+    perspective: 1000px;
+}
+#astra-orb {
+    transition: transform 0.1s ease-out;
+    transform-style: preserve-3d;
+}
+#astra-face {
+    transition: transform 0.1s ease-out;
+}
+
+/* Listening State Waves Overlay (Moved to bottom) */
+#listening-canvas {
+    position: absolute;
+    bottom: 0;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 15;
+    pointer-events: none;
+    width: 100vw;
+    height: 240px;
+}
