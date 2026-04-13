@@ -37,3 +37,16 @@ Status: Shipping iteratively with production-focused improvements.
 1. Harden audio input fallback and degraded mode for duplex start.
 2. Add one-call tuning presets (`fast`, `balanced`, `natural`).
 3. Add continuous benchmark scripts for first-audio and interruption latency.
+
+## Dev Manager: startup fix (2026-04-13)
+
+- **Root cause:** `dev-manager` FastAPI startup was blocked by `start_all()`, which waits for Whisper/LLM/TTS/Intent. Because startup blocked, the `/health` endpoint did not come up in time for `start_stack.ps1` to detect service readiness.
+- **Fix applied:** `start_all(reason="startup")` now runs in a background bootstrap thread instead of blocking startup. Also replaced `uvicorn.run("services.dev_manager:app", ...)` with `uvicorn.run(app, ...)` to avoid self-import/module-path issues when launching as a script.
+- **Validated:** Python syntax compile passes for `services/dev_manager.py`.
+- **How to validate locally:**
+  - Run: `.
+    start_stack.ps1 -UseDevManager -ServicesOnly`
+  - If it still fails, run once to capture the traceback:
+    `venv\python.exe services\dev_manager.py`
+
+This change should make `http://127.0.0.1:3900/health` respond quickly while services continue booting in the background.
