@@ -135,6 +135,12 @@ ct2-transformers-converter --model openai/whisper-small --output_dir faster-whis
 
 Note that the model weights are saved in FP16. This type can be changed when the model is loaded using the [`compute_type` option in CTranslate2](https://opennmt.net/CTranslate2/quantization.html).
 
+## Voice2 integration notes
+
+- Service: `services/whisper_service.py`
+- Health check: `GET http://127.0.0.1:8001/health`
+- Used in duplex loop and standalone whisper test mode.
+
 ## More information
 
-**For more information about the original model, see its [model card](https://huggingface.co/openai/whisper-small).**
+For more information about the original model, see its [model card](https://huggingface.co/openai/whisper-small).

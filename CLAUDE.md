@@ -21,8 +21,8 @@ Fall back to Grep/Glob/Read **only** when the graph doesn't cover what you need.
 
 | Tool | Use when |
 |------|----------|
-| `detect_changes` | Reviewing code changes â€” gives risk-scored analysis |
-| `get_review_context` | Need source snippets for review â€” token-efficient |
+| `detect_changes` | Reviewing code changes — gives risk-scored analysis |
+| `get_review_context` | Need source snippets for review — token-efficient |
 | `get_impact_radius` | Understanding blast radius of a change |
 | `get_affected_flows` | Finding which execution paths are impacted |
 | `query_graph` | Tracing callers, callees, imports, tests, dependencies |
@@ -36,3 +36,12 @@ Fall back to Grep/Glob/Read **only** when the graph doesn't cover what you need.
 2. Use `detect_changes` for code review.
 3. Use `get_affected_flows` to understand impact.
 4. Use `query_graph` pattern="tests_for" to check coverage.
+
+---
+
+## Project Snapshot (YC style)
+
+- Build the fastest local voice assistant loop on Windows.
+- Optimize for first-audio latency + natural speech quality.
+- Recent upgrades: adaptive TTS chunking, runtime TTS settings API, stronger stream interrupt behavior.
+- Primary tuning knobs: `edge_base_rate_pct`, `chunk_initial_words`, `chunk_steady_words`, `chunk_max_chars`.
