@@ -78,3 +78,15 @@ def test_mcp_file_search_endpoint():
     assert response.status_code == 200
     body = response.json()
     assert "matches" in body
+
+
+def test_metrics_endpoint(monkeypatch):
+    monkeypatch.setattr(llm_service._http_session, "post", _fake_post)
+    with TestClient(llm_service.app) as client:
+        _ = client.post("/generate", json={"prompt": "metrics check"})
+        response = client.get("/metrics")
+    assert response.status_code == 200
+    body = response.json()
+    assert "latency_ms" in body
+    assert "throughput" in body
+    assert "errors" in body
