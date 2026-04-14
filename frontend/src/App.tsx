@@ -83,13 +83,7 @@ function App() {
         <DebugPanel />
         <Waveform />
 
-        <div className={`absolute bottom-40 left-1/2 -translate-x-1/2 z-40 pointer-events-none transition-all duration-500 ${layoutPadding}`}>
-          <div className="flex justify-center mb-3">
-            <div className={`px-4 py-1.5 rounded-full text-xs font-manrope tracking-wide backdrop-blur-md border transition-all duration-300 ${STATE_COLORS[state] || ''}`}>
-              {state === 'listening' ? '🎙️ ' : ''}{STATE_LABELS[state] || state}
-            </div>
-          </div>
-        </div>
+
 
         {/* Updated Bottom Controls: Increased size and padding */}
         <div className={`fixed bottom-0 left-1/2 -translate-x-1/2 w-full px-4 pb-12 flex flex-col items-center z-50 transition-all duration-500 md:max-w-2xl ${layoutPadding}`}>
