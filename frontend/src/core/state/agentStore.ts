@@ -33,9 +33,10 @@ interface AgentStore {
   // Chat History
   chatHistory: ChatMessage[];
 
-  // Audio Reactivity
   micRms: number;              // 0–1 normalized RMS from VAD for orb animation
   playbackRms: number;         // 0–1 normalized RMS from TTS playback for mouth animation
+  isAudioPlaying: boolean;     // Current speaker playback state
+  showDebug: boolean;          // Visibility of debug metrics panel
 
   // Metrics
   metrics: MetricsSnapshot | null;
@@ -54,6 +55,8 @@ interface AgentStore {
   appendResponse: (chunk: string) => void;
   setMicRms: (rms: number) => void;
   setPlaybackRms: (rms: number) => void;
+  setIsAudioPlaying: (playing: boolean) => void;
+  setShowDebug: (show: boolean) => void;
   setMetrics: (metrics: MetricsSnapshot) => void;
   setFirstTokenLatency: (ms: number) => void;
   setVolume: (volume: number) => void;
@@ -76,6 +79,7 @@ export const useAgentStore = create<AgentStore>((set) => ({
   micRms: 0,
   playbackRms: 0,
   isAudioPlaying: false,
+  showDebug: false,
   metrics: null,
   firstTokenLatencyMs: 0,
   volume: 100,
@@ -90,6 +94,7 @@ export const useAgentStore = create<AgentStore>((set) => ({
   setMicRms: (rms) => set({ micRms: rms }),
   setPlaybackRms: (rms) => set({ playbackRms: rms }),
   setIsAudioPlaying: (playing) => set({ isAudioPlaying: playing }),
+  setShowDebug: (show) => set({ showDebug: show }),
   setMetrics: (metrics) => set({ metrics }),
   setFirstTokenLatency: (ms) => set({ firstTokenLatencyMs: ms }),
   setVolume: (volume) => set({ volume }),
@@ -106,6 +111,7 @@ export const useAgentStore = create<AgentStore>((set) => ({
     micRms: 0,
     playbackRms: 0,
     isAudioPlaying: false,
+    showDebug: false,
     firstTokenLatencyMs: 0,
   }),
 
@@ -116,6 +122,7 @@ export const useAgentStore = create<AgentStore>((set) => ({
     micRms: 0,
     playbackRms: 0,
     isAudioPlaying: false,
+    showDebug: false,
     firstTokenLatencyMs: 0,
   }),
 }));

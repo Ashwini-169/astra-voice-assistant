@@ -2,8 +2,10 @@ import React from 'react';
 import { useAgentStore } from '../core/state/agentStore';
 
 export const DebugPanel: React.FC = () => {
-  const { state, metrics, firstTokenLatencyMs, duplexEnabled, mode } = useAgentStore();
+  const { state, metrics, firstTokenLatencyMs, duplexEnabled, mode, showDebug } = useAgentStore();
   
+  if (!showDebug) return null;
+
   const vadStatus = state === 'listening' ? 'Speech Detect' : state === 'idle' ? 'Standby' : 'Active';
   const asrStatus = state === 'listening' ? 'Streaming' : 'Ready';
   const llmStatus = state === 'thinking' ? 'Streaming' : state === 'speaking' ? 'Done' : 'Idle';

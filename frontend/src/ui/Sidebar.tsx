@@ -13,7 +13,7 @@ const NAV_ITEMS = [
 ];
 
 export const Sidebar: React.FC = () => {
-  const { mode, setMode } = useAgentStore();
+  const { mode, setMode, showDebug, setShowDebug } = useAgentStore();
 
   return (
     <aside className="fixed left-0 top-0 h-full py-12 z-40 hidden md:flex flex-col items-center bg-zinc-950/40 backdrop-blur-xl w-20 rounded-r-3xl shadow-[0_0_40px_rgba(99,102,241,0.08)]">
@@ -59,8 +59,13 @@ export const Sidebar: React.FC = () => {
       </nav>
 
       {/* Debug (bottom) */}
-      <button className="text-zinc-600 hover:text-zinc-300 transition-all flex flex-col items-center gap-1 group mb-4">
-        <span className="material-symbols-outlined">speed</span>
+      <button 
+        onClick={() => setShowDebug(!showDebug)}
+        className={`transition-all flex flex-col items-center gap-1 group mb-4 ${
+          showDebug ? 'text-[var(--color-primary)] scale-110' : 'text-zinc-600 hover:text-zinc-300'
+        }`}
+      >
+        <span className="material-symbols-outlined" style={showDebug ? { fontVariationSettings: "'FILL' 1" } : {}}>speed</span>
         <span className="font-manrope text-[8px] uppercase tracking-widest opacity-0 group-hover:opacity-100 transition-opacity">Debug</span>
       </button>
     </aside>
