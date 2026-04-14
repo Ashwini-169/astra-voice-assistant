@@ -29,9 +29,13 @@ const STATE_COLORS: Record<string, string> = {
 
 function App() {
   const { startPipeline, stopPipeline } = useVoicePipeline();
-  const { state, duplexEnabled, setDuplexEnabled, mode, volume, setVolume } = useAgentStore();
+  const { state, duplexEnabled, setDuplexEnabled, mode, volume, setVolume, chatHistory, response, partialTranscript } = useAgentStore();
   const [chatInput, setChatInput] = useState('');
   const [showVolumeSlider, setShowVolumeSlider] = useState(false);
+
+  // Determine if transcript reflects content worth showing
+  const hasTranscript = chatHistory.length > 0 || response.length > 0 || partialTranscript.length > 0;
+  const layoutPadding = hasTranscript ? 'md:pr-96' : '';
 
   // Start metrics polling
   useMetrics();
@@ -73,22 +77,22 @@ function App() {
       {/* ... header ... */}
       <Sidebar />
 
-      <main className="relative h-screen w-full flex flex-col items-center p-6 bg-[var(--color-surface)] overflow-hidden md:pr-96">
+      <main className={`relative h-screen w-full flex flex-col items-center p-6 bg-[var(--color-surface)] overflow-hidden transition-all duration-500 ${layoutPadding}`}>
         {/* ... environment background ... */}
         <Avatar />
         <DebugPanel />
         <Waveform />
 
-        <div className="absolute bottom-40 left-1/2 -translate-x-1/2 z-40 pointer-events-none md:pr-96">
+        <div className={`absolute bottom-40 left-1/2 -translate-x-1/2 z-40 pointer-events-none transition-all duration-500 ${layoutPadding}`}>
           <div className="flex justify-center mb-3">
             <div className={`px-4 py-1.5 rounded-full text-xs font-manrope tracking-wide backdrop-blur-md border transition-all duration-300 ${STATE_COLORS[state] || ''}`}>
-              {STATE_LABELS[state] || state}
+              {state === 'listening' ? '🎙️ ' : ''}{STATE_LABELS[state] || state}
             </div>
           </div>
         </div>
 
         {/* Updated Bottom Controls: Increased size and padding */}
-        <div className="fixed bottom-0 left-1/2 -translate-x-1/2 w-full px-4 pb-12 flex flex-col items-center z-50 md:max-w-2xl md:pr-96">
+        <div className={`fixed bottom-0 left-1/2 -translate-x-1/2 w-full px-4 pb-12 flex flex-col items-center z-50 transition-all duration-500 md:max-w-2xl ${layoutPadding}`}>
           <div className="bg-zinc-950/40 backdrop-blur-md rounded-[2.5rem] px-10 py-6 flex items-center justify-between w-full shadow-2xl shadow-[var(--color-primary)]/10 border border-white/5">
             
             {/* Volume Control with Slider */}
@@ -163,7 +167,7 @@ function App() {
 
         {/* Chat Input (Chat/Agent mode) */}
         {(mode === 'chat' || mode === 'agent') && (
-          <form onSubmit={handleChatSubmit} className="fixed bottom-24 left-1/2 -translate-x-1/2 w-full max-w-lg px-4 z-50 md:pr-96">
+          <form onSubmit={handleChatSubmit} className={`fixed bottom-24 left-1/2 -translate-x-1/2 w-full max-w-lg px-4 z-50 transition-all duration-500 ${layoutPadding}`}>
             <div className="flex items-center gap-3 bg-zinc-900/80 backdrop-blur-md rounded-full px-5 py-3 border border-white/10">
               <input
                 type="text"

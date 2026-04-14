@@ -186,6 +186,20 @@ export const Avatar: React.FC = () => {
       {/* Character Title */}
       <div className="mt-12 text-center">
         <h1 className="text-5xl md:text-7xl font-extrabold tracking-tighter text-white mb-2">Astra</h1>
+        
+        {/* State Indicator below Astra */}
+        <div className="flex items-center justify-center gap-3">
+          <span className={`w-1.5 h-1.5 rounded-full animate-ping ${
+            state === 'listening' ? 'bg-emerald-400' : 
+            state === 'thinking' ? 'bg-amber-400' :
+            state === 'speaking' ? 'bg-cyan-400' :
+            state === 'error' ? 'bg-red-400' :
+            'bg-zinc-500'
+          }`}></span>
+          <p className="text-[var(--color-on-surface-variant)] font-label tracking-[0.2em] uppercase text-xs">
+            {state}
+          </p>
+        </div>
       </div>
     </div>
   );
