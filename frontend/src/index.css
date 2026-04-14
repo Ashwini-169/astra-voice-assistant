@@ -79,7 +79,27 @@ h1, h2, h3 { font-family: 'Manrope', sans-serif; }
     background: radial-gradient(circle at 30% 30%, #99f7ff 0%, #ac8aff 45%, #ec63ff 100%);
 }
 .energy-halo {
-    background: radial-gradient(circle, rgba(153, 247, 255, 0.1) 0%, rgba(236, 99, 255, 0.05) 50%, transparent 70%);
+    background: radial-gradient(circle, rgba(153, 247, 255, 0.4) 0%, rgba(172, 138, 255, 0.2) 45%, transparent 75%);
+}
+
+@keyframes breathe {
+    0%, 100% { opacity: 0.3; transform: translate(-50%, -50%) scale(0.95); }
+    50% { opacity: 0.5; transform: translate(-50%, -50%) scale(1.05); }
+}
+
+/* Fluid Liquid Animation */
+.fluid-aura {
+    animation: liquid 12s ease-in-out infinite alternate, breathe 8s infinite ease-in-out;
+}
+
+@keyframes liquid {
+    0% { border-radius: 60% 40% 30% 70% / 60% 30% 70% 40%; }
+    50% { border-radius: 30% 60% 70% 40% / 50% 60% 30% 60%; }
+    100% { border-radius: 60% 40% 30% 70% / 60% 30% 70% 40%; }
+}
+
+#astra-orb {
+    will-change: transform, box-shadow;
 }
 .glass-panel {
     background: rgba(44, 44, 45, 0.4);
@@ -121,22 +141,11 @@ h1, h2, h3 { font-family: 'Manrope', sans-serif; }
     100% { transform: translateX(50%) translateZ(0) scaleY(1); }
 }
 
-/* Speaking Mouth Animation */
+/* Speaking Mouth Base */
 .orb-mouth {
-    width: 24px;
-    height: 4px;
     background: #99f7ff;
-    border-radius: 99px;
     box-shadow: 0 0 10px #00f1fe;
-    transition: all 0.2s ease;
-}
-/* Only pulse when "speaking" or active */
-.is-speaking .orb-mouth {
-    animation: speaking 0.4s ease-in-out infinite alternate;
-}
-@keyframes speaking {
-    from { height: 2px; width: 12px; opacity: 0.6; }
-    to { height: 8px; width: 16px; opacity: 1; border-radius: 4px; }
+    /* Dimensions and transitions are injected dynamically by React based on playback RMS */
 }
 
 /* Blink Animation */
@@ -170,18 +179,109 @@ h1, h2, h3 { font-family: 'Manrope', sans-serif; }
     transition: transform 0.1s ease-out;
     transform-style: preserve-3d;
 }
-#astra-face {
+
+#astra-container {
     transition: transform 0.1s ease-out;
+    perspective: 1000px;
 }
 
-/* Listening State Waves Overlay (Moved to bottom) */
-#listening-canvas {
+/* Speak Ring Animation */
+.ring-active {
     position: absolute;
-    bottom: 0;
+    top: 50%;
     left: 50%;
-    transform: translateX(-50%);
-    z-index: 15;
-    pointer-events: none;
-    width: 100vw;
-    height: 240px;
+    animation: ring-pulse 2s infinite ease-out, ring-rotate 4s infinite linear;
+}
+
+@keyframes ring-pulse {
+    0% { transform: translate(-50%, -50%) scale(0.95); opacity: 0; }
+    50% { transform: translate(-50%, -50%) scale(1.1); opacity: 0.8; }
+    100% { transform: translate(-50%, -50%) scale(1.4); opacity: 0; }
+}
+
+@keyframes ring-rotate {
+    from { transform: translate(-50%, -50%) rotate(0deg) scale(1.1); }
+    to { transform: translate(-50%, -50%) rotate(360deg) scale(1.1); }
+}
+
+/* ═══ Orb State Animations ═══ */
+
+/* Listening: pulse border with mic energy */
+.orb-listening {
+    animation: orb-listen-pulse 1.5s ease-in-out infinite;
+}
+@keyframes orb-listen-pulse {
+    0%, 100% { filter: drop-shadow(0 0 8px rgba(52, 211, 153, 0.3)); }
+    50% { filter: drop-shadow(0 0 20px rgba(52, 211, 153, 0.6)); }
+}
+
+/* Thinking: slow breathing glow */
+.orb-thinking {
+    animation: orb-think-glow 3s ease-in-out infinite;
+}
+@keyframes orb-think-glow {
+    0%, 100% { filter: drop-shadow(0 0 10px rgba(172, 138, 255, 0.3)); }
+    50% { filter: drop-shadow(0 0 30px rgba(172, 138, 255, 0.6)); }
+}
+
+/* Speaking: active energy glow */
+.orb-speaking {
+    filter: drop-shadow(0 0 15px rgba(153, 247, 255, 0.4));
+}
+
+/* Interrupted: quick flicker */
+.orb-interrupted {
+    animation: orb-flicker 0.1s linear 3;
+}
+@keyframes orb-flicker {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+}
+
+/* Error: red pulse */
+.orb-error {
+    animation: orb-error-pulse 0.8s ease-in-out infinite;
+}
+@keyframes orb-error-pulse {
+    0%, 100% { filter: drop-shadow(0 0 10px rgba(239, 68, 68, 0.3)); }
+    50% { filter: drop-shadow(0 0 25px rgba(239, 68, 68, 0.7)); }
+}
+
+/* ═══ Custom Scrollbar ═══ */
+.custom-scrollbar::-webkit-scrollbar {
+    width: 4px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+    background: transparent;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 4px;
+}
+/* ═══ Volume Slider (Vertical) ═══ */
+.vertical-range {
+    width: 6px;
+    height: 100px;
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 5px;
+    outline: none;
+    cursor: pointer;
+}
+
+.vertical-range::-webkit-slider-runnable-track {
+    width: 6px;
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 5px;
+}
+
+.vertical-range::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 14px;
+    height: 14px;
+    background: var(--color-primary);
+    border-radius: 50%;
+    margin-left: -4px; /* Center thumb on track for vertical */
+    box-shadow: 0 0 10px var(--color-primary);
+    transition: transform 0.15s ease;
 }

@@ -4,7 +4,6 @@
  */
 export class BrowserTTS {
   private synth: SpeechSynthesis;
-  private currentUtterance: SpeechSynthesisUtterance | null = null;
 
   constructor() {
     this.synth = window.speechSynthesis;
@@ -38,22 +37,18 @@ export class BrowserTTS {
       if (preferred) utterance.voice = preferred;
 
       utterance.onend = () => {
-        this.currentUtterance = null;
         resolve();
       };
       utterance.onerror = (e) => {
-        this.currentUtterance = null;
         reject(e);
       };
 
-      this.currentUtterance = utterance;
       this.synth.speak(utterance);
     });
   }
 
   stop(): void {
     this.synth.cancel();
-    this.currentUtterance = null;
   }
 }
 

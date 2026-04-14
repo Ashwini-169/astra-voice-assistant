@@ -1,21 +1,47 @@
+import { useState, useEffect } from 'react';
 import { Sidebar } from './ui/Sidebar';
 import { Avatar } from './ui/Avatar';
 import { Waveform } from './ui/Waveform';
 import { useVoicePipeline } from './hooks/useVoicePipeline';
 import { useAgentStore } from './core/state/agentStore';
 import { audioPlayer } from './core/audio/player';
+import { DebugPanel } from './ui/DebugPanel';
+import { TranscriptPanel } from './ui/TranscriptPanel';
+import { useMetrics } from './hooks/useMetrics';
 
 const STATE_LABELS: Record<string, string> = {
-  idle: 'System Idle',
-  listening: '🎙️ Listening...',
-  thinking: '🧠 Thinking...',
-  speaking: '🔊 Speaking...',
-  interrupting: '⏹️ Interrupting...',
+  idle: 'Ready',
+  listening: '🎙️ Listening',
+  thinking: '🧠 Processing',
+  speaking: '🔊 Speaking',
+  interrupting: '⏹️ Interrupted',
+  error: '❌ Error',
+};
+
+const STATE_COLORS: Record<string, string> = {
+  idle: 'bg-zinc-900/60 border-zinc-700/30 text-zinc-400',
+  listening: 'bg-emerald-900/30 border-emerald-500/30 text-emerald-300 animate-pulse',
+  thinking: 'bg-amber-900/30 border-amber-500/30 text-amber-300 animate-pulse',
+  speaking: 'bg-indigo-900/30 border-indigo-500/30 text-indigo-300',
+  interrupting: 'bg-red-900/30 border-red-500/30 text-red-300',
+  error: 'bg-red-900/40 border-red-500/40 text-red-300',
 };
 
 function App() {
   const { startPipeline, stopPipeline } = useVoicePipeline();
-  const { state, transcript, response } = useAgentStore();
+  const { state, duplexEnabled, setDuplexEnabled, mode, volume, setVolume } = useAgentStore();
+  const [chatInput, setChatInput] = useState('');
+  const [showVolumeSlider, setShowVolumeSlider] = useState(false);
+
+  // Start metrics polling
+  useMetrics();
+
+  // Sync volume with player
+  useEffect(() => {
+    audioPlayer.setVolume(volume);
+  }, [volume]);
+
+  // ... rest of handlers ...
 
   const handleMicClick = () => {
     audioPlayer.resume();
@@ -26,140 +52,136 @@ function App() {
     }
   };
 
+  const handleChatSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!chatInput.trim()) return;
+    const { addMessage } = useAgentStore.getState();
+    addMessage({ role: 'user', content: chatInput.trim() });
+    setChatInput('');
+  };
+
+  const toggleDuplex = () => {
+    setDuplexEnabled(!duplexEnabled);
+    if (!duplexEnabled && state === 'idle') {
+      audioPlayer.resume();
+      startPipeline();
+    }
+  };
+
   return (
     <div className="bg-surface text-on-surface min-h-screen overflow-hidden selection:bg-primary/30">
-      
-      {/* TopNavBar */}
-      <header className="flex justify-between items-center px-8 py-6 w-full fixed top-0 z-50 bg-transparent">
-        <div className="text-xl font-bold tracking-tighter text-white font-manrope">Ethereal AI</div>
-        <nav className="hidden md:flex items-center gap-8 text-sm font-manrope tracking-tight">
-          <a className="text-white font-semibold hover:text-indigo-300 transition-colors" href="#">Astra</a>
-          <a className="text-zinc-500 hover:text-indigo-300 transition-colors" href="#">Manifest</a>
-          <a className="text-zinc-500 hover:text-indigo-300 transition-colors" href="#">Archive</a>
-        </nav>
-        <div className="flex items-center gap-4">
-          <button className="text-zinc-500 hover:text-indigo-300 transition-colors">
-            <span className="material-symbols-outlined mt-1">history</span>
-          </button>
-          <button className="text-zinc-500 hover:text-indigo-300 transition-colors">
-            <span className="material-symbols-outlined mt-1">settings</span>
-          </button>
-          <div className="w-8 h-8 rounded-full overflow-hidden bg-[var(--color-surface-container-highest)]">
-            <img alt="User profile" className="w-full h-full object-cover" src="https://lh3.googleusercontent.com/aida-public/AB6AXuCVuSrXba7Q1F6ClOedQss2Tr3Wfz5Y9Tq7ozqhMVKb45io_UO8y6yDJnc96LUivzA4ANftcrm_wxT7YAv728sTM9-91-VZ_X5hsRuYyvWtPMiTdK-7egJq4WEgENAkS8FeSBswhaNgAcYXJYpPPR6P9nwzqD9nik10j6rWgxtGtohYZmpYUDswwgFeBkvXntfTrnvUf-fSbWADQ5CFjuAE_3F2TgJ1IjrjpBt97ysFjTNJeDvpMhzJn62nQ_Uc5q2YSn8-vhLu5eg4"/>
-          </div>
-        </div>
-      </header>
-
+      {/* ... header ... */}
       <Sidebar />
 
-      <main className="relative h-screen w-full flex flex-col items-center p-6 bg-[var(--color-surface)] overflow-hidden">
-        {/* Environment Background Layer */}
-        <div className="absolute inset-0 z-0 pointer-events-none">
-          <div className="wave-container">
-            <svg className="wave wave-1" preserveAspectRatio="none" viewBox="0 0 1440 320" xmlns="http://www.w3.org/2000/svg">
-                <path d="M0,192L48,197.3C96,203,192,213,288,229.3C384,245,480,267,576,250.7C672,235,768,181,864,181.3C960,181,1056,235,1152,234.7C1248,235,1344,181,1392,154.7L1440,128L1440,320L1392,320C1344,320,1248,320,1152,320C1056,320,960,320,864,320C768,320,672,320,576,320C480,320,384,320,288,320C192,320,96,320,48,320L0,320Z" fill="#99f7ff" fillOpacity="0.1"></path>
-            </svg>
-            <svg className="wave wave-2" preserveAspectRatio="none" viewBox="0 0 1440 320" xmlns="http://www.w3.org/2000/svg">
-                <path d="M0,64L48,80C96,96,192,128,288,128C384,128,480,96,576,106.7C672,117,768,171,864,176C960,181,1056,139,1152,122.7C1248,107,1344,117,1392,122.7L1440,128L1440,320L1392,320C1344,320,1248,320,1152,320C1056,320,960,320,864,320C768,320,672,320,576,320C480,320,384,320,288,320C192,320,96,320,48,320L0,320Z" fill="#ec63ff" fillOpacity="0.1"></path>
-            </svg>
-          </div>
-          <div className="absolute top-1/4 left-1/4 w-96 h-96 bg-[var(--color-primary)]/5 rounded-full blur-[120px]"></div>
-          <div className="absolute bottom-1/4 right-1/4 w-[500px] h-[500px] bg-[var(--color-tertiary)]/5 rounded-full blur-[150px]"></div>
-          <div className="absolute inset-0 bg-[url('https://www.transparenttextures.com/patterns/stardust.png')] opacity-10 mix-blend-screen"></div>
-        </div>
-
+      <main className="relative h-screen w-full flex flex-col items-center p-6 bg-[var(--color-surface)] overflow-hidden md:pr-96">
+        {/* ... environment background ... */}
         <Avatar />
-
-        {/* Floating UI Widgets */}
-        <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
-            {/* Sentiment Gauge */}
-            <div className="absolute left-10 md:left-40 top-1/2 -translate-y-1/2 pointer-events-auto hidden lg:block">
-                <div className="glass-panel p-6 rounded-xl border border-white/5 w-48 shadow-2xl">
-                    <p className="text-[10px] text-zinc-500 uppercase tracking-widest mb-4">Neural Harmony</p>
-                    <div className="h-1 w-full bg-[var(--color-surface-container-highest)] rounded-full overflow-hidden">
-                        <div className="h-full w-4/5 bg-gradient-to-r from-primary to-secondary"></div>
-                    </div>
-                    <div className="flex justify-between mt-2">
-                        <span className="text-[10px] text-[var(--color-primary)]">88%</span>
-                        <span className="text-[10px] text-zinc-400">Optimal</span>
-                    </div>
-                </div>
-            </div>
-
-            {/* Active Protocol */}
-            <div className="absolute right-10 md:right-40 top-1/2 -translate-y-1/2 pointer-events-auto hidden lg:block">
-                <div className="glass-panel p-6 rounded-xl border border-white/5 w-56 shadow-2xl">
-                    <div className="flex items-center gap-3 mb-3">
-                        <span className="material-symbols-outlined text-[var(--color-secondary)] text-lg">auto_awesome</span>
-                        <p className="text-[10px] text-zinc-400 uppercase tracking-widest">Synthesis Mode</p>
-                    </div>
-                    <h3 className="text-lg font-manrope text-white font-semibold leading-tight">Abstract Reality Reconstruction</h3>
-                </div>
-            </div>
-        </div>
-
+        <DebugPanel />
         <Waveform />
 
-        {/* Live Transcript & Response Panel */}
-        <div className="fixed bottom-32 left-1/2 -translate-x-1/2 w-full max-w-lg px-6 z-40 pointer-events-none">
-          {/* State Badge */}
+        <div className="absolute bottom-40 left-1/2 -translate-x-1/2 z-40 pointer-events-none md:pr-96">
           <div className="flex justify-center mb-3">
-            <div className={`px-4 py-1.5 rounded-full text-xs font-manrope tracking-wide backdrop-blur-md border transition-all duration-300 ${
-              state === 'idle' 
-                ? 'bg-zinc-900/60 border-zinc-700/30 text-zinc-400' 
-                : state === 'listening' 
-                ? 'bg-emerald-900/30 border-emerald-500/30 text-emerald-300 animate-pulse' 
-                : state === 'thinking'
-                ? 'bg-amber-900/30 border-amber-500/30 text-amber-300 animate-pulse'
-                : state === 'speaking'
-                ? 'bg-indigo-900/30 border-indigo-500/30 text-indigo-300'
-                : 'bg-red-900/30 border-red-500/30 text-red-300'
-            }`}>
+            <div className={`px-4 py-1.5 rounded-full text-xs font-manrope tracking-wide backdrop-blur-md border transition-all duration-300 ${STATE_COLORS[state] || ''}`}>
               {STATE_LABELS[state] || state}
             </div>
           </div>
-
-          {/* Transcript */}
-          {transcript && (
-            <div className="glass-panel rounded-xl px-5 py-3 mb-2 border border-white/5">
-              <p className="text-[10px] text-zinc-500 uppercase tracking-widest mb-1">You</p>
-              <p className="text-sm text-zinc-200 font-inter leading-relaxed">{transcript}</p>
-            </div>
-          )}
-
-          {/* Response */}
-          {response && (
-            <div className="glass-panel rounded-xl px-5 py-3 border border-indigo-500/10 max-h-32 overflow-y-auto">
-              <p className="text-[10px] text-indigo-400 uppercase tracking-widest mb-1">Astra</p>
-              <p className="text-sm text-zinc-100 font-inter leading-relaxed">{response}</p>
-            </div>
-          )}
         </div>
 
-        {/* Bottom Controls */}
-        <div className="fixed bottom-0 left-1/2 -translate-x-1/2 w-full px-4 pb-8 flex flex-col items-center z-50 md:max-w-xl">
-          <div className="bg-zinc-950/20 backdrop-blur-md rounded-full px-8 py-4 flex items-center gap-8 shadow-2xl shadow-indigo-500/10 border border-white/5">
-            <button className="flex flex-col items-center justify-center text-zinc-500 hover:text-white transition-colors">
-              <span className="material-symbols-outlined mt-1">terminal</span>
-            </button>
+        {/* Updated Bottom Controls: Increased size and padding */}
+        <div className="fixed bottom-0 left-1/2 -translate-x-1/2 w-full px-4 pb-12 flex flex-col items-center z-50 md:max-w-2xl md:pr-96">
+          <div className="bg-zinc-950/40 backdrop-blur-md rounded-[2.5rem] px-10 py-6 flex items-center justify-between w-full shadow-2xl shadow-[var(--color-primary)]/10 border border-white/5">
+            
+            {/* Volume Control with Slider */}
+            <div 
+              className="relative flex flex-col items-center group"
+              onMouseEnter={() => setShowVolumeSlider(true)}
+              onMouseLeave={() => setShowVolumeSlider(false)}
+            >
+              {showVolumeSlider && (
+                <div className="absolute bottom-full mb-6 bg-zinc-900/90 backdrop-blur-lg p-3 rounded-2xl border border-white/10 shadow-xl h-32 flex flex-col items-center">
+                  <input 
+                    type="range" 
+                    min="0" 
+                    max="100" 
+                    value={volume} 
+                    onChange={(e) => setVolume(Number(e.target.value))}
+                    className="w-1.5 h-24 bg-zinc-800 rounded-lg accent-[var(--color-primary)] outline-none cursor-pointer vertical-range"
+                    style={{ writingMode: 'vertical-lr', direction: 'rtl' } as any}
+                  />
+                  <span className="text-[9px] text-zinc-400 mt-2 font-mono">{volume}%</span>
+                </div>
+              )}
+              <button className={`flex flex-col items-center justify-center transition-colors ${volume === 0 ? 'text-red-400' : 'text-zinc-500 hover:text-white'}`} title="Volume">
+                <span className="material-symbols-outlined text-2xl">{volume === 0 ? 'volume_off' : volume < 50 ? 'volume_down' : 'volume_up'}</span>
+              </button>
+            </div>
+            
+            {/* Mic Toggle: Increased size */}
             <button 
               className="group relative" 
               onClick={handleMicClick}
+              title={state === 'idle' ? 'Start Listening' : 'Stop'}
             >
-              <div className={`absolute -inset-4 bg-[var(--color-primary)]/20 rounded-full blur-xl transition-all ${state !== 'idle' ? 'bg-[var(--color-primary)]/50' : 'group-hover:bg-[var(--color-primary)]/40'}`}></div>
-              <div className="w-16 h-16 rounded-full bg-gradient-to-br from-[#ac8aff] to-[#99f7ff] flex items-center justify-center relative z-10 shadow-lg shadow-[var(--color-primary)]/20 group-active:scale-95 transition-transform">
-                <span className="material-symbols-outlined text-[#005f64] text-3xl" style={{ fontVariationSettings: "'FILL' 1" }}>
+              <div className={`absolute -inset-6 bg-[var(--color-primary)]/20 rounded-full blur-2xl transition-all ${state !== 'idle' ? 'bg-[var(--color-primary)]/50 scale-110' : 'group-hover:bg-[var(--color-primary)]/40'}`}></div>
+              <div className={`w-20 h-20 rounded-full flex items-center justify-center relative z-10 shadow-2xl group-active:scale-90 transition-transform ${
+                state === 'error' 
+                  ? 'bg-gradient-to-br from-red-500 to-red-700 shadow-red-500/30'
+                  : state !== 'idle'
+                  ? 'bg-gradient-to-br from-red-500 to-orange-500 shadow-red-500/30 animate-pulse'
+                  : 'bg-gradient-to-br from-[var(--color-secondary)] to-[var(--color-primary)] shadow-[var(--color-primary)]/30'
+              }`}>
+                <span className="material-symbols-outlined text-white text-4xl" style={{ fontVariationSettings: "'FILL' 1" }}>
                   {state !== 'idle' ? 'stop' : 'mic'}
                 </span>
               </div>
             </button>
-            <button className="flex flex-col items-center justify-center text-zinc-500 hover:text-white transition-colors">
-              <span className="material-symbols-outlined mt-1">flare</span>
+
+            {/* Stop AI */}
+            <button 
+              className="flex flex-col items-center justify-center text-zinc-500 hover:text-red-400 transition-colors disabled:opacity-20" 
+              onClick={stopPipeline} 
+              title="Stop AI"
+              disabled={state === 'idle'}
+            >
+              <span className="material-symbols-outlined text-2xl">stop_circle</span>
             </button>
+
+            {/* Duplex Toggle */}
+            <button 
+              className={`flex flex-col items-center justify-center transition-colors ${
+                duplexEnabled ? 'text-emerald-400 hover:text-emerald-300' : 'text-zinc-500 hover:text-zinc-300'
+              }`}
+              onClick={toggleDuplex}
+              title={duplexEnabled ? 'Duplex: ON' : 'Duplex: OFF'}
+            >
+              <span className="material-symbols-outlined text-2xl" style={duplexEnabled ? { fontVariationSettings: "'FILL' 1" } : {}}>bolt</span>
+            </button>
+
           </div>
         </div>
 
+
+        {/* Chat Input (Chat/Agent mode) */}
+        {(mode === 'chat' || mode === 'agent') && (
+          <form onSubmit={handleChatSubmit} className="fixed bottom-24 left-1/2 -translate-x-1/2 w-full max-w-lg px-4 z-50 md:pr-96">
+            <div className="flex items-center gap-3 bg-zinc-900/80 backdrop-blur-md rounded-full px-5 py-3 border border-white/10">
+              <input
+                type="text"
+                value={chatInput}
+                onChange={(e) => setChatInput(e.target.value)}
+                placeholder="Type a message..."
+                className="flex-1 bg-transparent text-sm text-white placeholder-zinc-500 outline-none font-inter"
+              />
+              <button type="submit" className="text-[var(--color-primary)] hover:text-white transition-colors">
+                <span className="material-symbols-outlined" style={{ fontVariationSettings: "'FILL' 1" }}>send</span>
+              </button>
+            </div>
+          </form>
+        )}
       </main>
+
+      {/* Transcript Panel (Right Side) */}
+      <TranscriptPanel />
 
       {/* BottomNavBar (Mobile Only) */}
       <nav className="md:hidden fixed bottom-0 left-1/2 -translate-x-1/2 w-full px-4 pb-8 flex justify-around items-center z-50">
