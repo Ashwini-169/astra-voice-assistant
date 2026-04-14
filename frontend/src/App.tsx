@@ -83,20 +83,18 @@ function App() {
         <DebugPanel />
         <Waveform />
 
-
-
-        {/* Updated Bottom Controls: Increased size and padding */}
-        <div className={`fixed bottom-0 left-1/2 -translate-x-1/2 w-full px-4 pb-12 flex flex-col items-center z-50 transition-all duration-500 md:max-w-2xl ${layoutPadding}`}>
-          <div className="bg-zinc-950/40 backdrop-blur-md rounded-[2.5rem] px-10 py-6 flex items-center justify-between w-full shadow-2xl shadow-[var(--color-primary)]/10 border border-white/5">
+        {/* Refined Bottom Controls: Smaller "Pleasant" Pill Design */}
+        <div className={`fixed bottom-0 left-1/2 -translate-x-1/2 w-full px-4 pb-8 flex flex-col items-center z-50 transition-all duration-500 md:max-w-lg ${layoutPadding}`}>
+          <div className="bg-zinc-950/45 backdrop-blur-xl rounded-full px-6 py-3 flex items-center justify-between w-full shadow-2xl border border-white/5">
             
-            {/* Volume Control with Slider */}
+            {/* Volume Control with Vertical Slider */}
             <div 
               className="relative flex flex-col items-center group"
               onMouseEnter={() => setShowVolumeSlider(true)}
               onMouseLeave={() => setShowVolumeSlider(false)}
             >
               {showVolumeSlider && (
-                <div className="absolute bottom-full mb-6 bg-zinc-900/90 backdrop-blur-lg p-3 rounded-2xl border border-white/10 shadow-xl h-32 flex flex-col items-center">
+                <div className="absolute bottom-full mb-4 bg-zinc-900/95 backdrop-blur-xl p-3 rounded-2xl border border-white/10 shadow-2xl h-32 flex flex-col items-center">
                   <input 
                     type="range" 
                     min="0" 
@@ -114,21 +112,21 @@ function App() {
               </button>
             </div>
             
-            {/* Mic Toggle: Increased size */}
+            {/* Mic Toggle: Smaller Pulse Circle */}
             <button 
               className="group relative" 
               onClick={handleMicClick}
               title={state === 'idle' ? 'Start Listening' : 'Stop'}
             >
-              <div className={`absolute -inset-6 bg-[var(--color-primary)]/20 rounded-full blur-2xl transition-all ${state !== 'idle' ? 'bg-[var(--color-primary)]/50 scale-110' : 'group-hover:bg-[var(--color-primary)]/40'}`}></div>
-              <div className={`w-20 h-20 rounded-full flex items-center justify-center relative z-10 shadow-2xl group-active:scale-90 transition-transform ${
+              <div className={`absolute -inset-4 bg-[var(--color-primary)]/10 rounded-full blur-xl transition-all ${state !== 'idle' ? 'bg-[var(--color-primary)]/30 scale-125' : ''}`}></div>
+              <div className={`w-14 h-14 rounded-full flex items-center justify-center relative z-10 shadow-xl group-active:scale-90 transition-transform ${
                 state === 'error' 
-                  ? 'bg-gradient-to-br from-red-500 to-red-700 shadow-red-500/30'
+                  ? 'bg-red-500 shadow-red-500/20'
                   : state !== 'idle'
-                  ? 'bg-gradient-to-br from-red-500 to-orange-500 shadow-red-500/30 animate-pulse'
-                  : 'bg-gradient-to-br from-[var(--color-secondary)] to-[var(--color-primary)] shadow-[var(--color-primary)]/30'
+                  ? 'bg-red-500 shadow-red-500/20 animate-pulse'
+                  : 'bg-gradient-to-br from-[var(--color-secondary)] to-[var(--color-primary)] shadow-[var(--color-primary)]/20'
               }`}>
-                <span className="material-symbols-outlined text-white text-4xl" style={{ fontVariationSettings: "'FILL' 1" }}>
+                <span className="material-symbols-outlined text-white text-3xl" style={{ fontVariationSettings: "'FILL' 1" }}>
                   {state !== 'idle' ? 'stop' : 'mic'}
                 </span>
               </div>
@@ -136,7 +134,7 @@ function App() {
 
             {/* Stop AI */}
             <button 
-              className="flex flex-col items-center justify-center text-zinc-500 hover:text-red-400 transition-colors disabled:opacity-20" 
+              className="flex items-center justify-center text-zinc-500 hover:text-red-400 transition-colors disabled:opacity-10" 
               onClick={stopPipeline} 
               title="Stop AI"
               disabled={state === 'idle'}
@@ -146,7 +144,7 @@ function App() {
 
             {/* Duplex Toggle */}
             <button 
-              className={`flex flex-col items-center justify-center transition-colors ${
+              className={`flex items-center justify-center transition-colors ${
                 duplexEnabled ? 'text-emerald-400 hover:text-emerald-300' : 'text-zinc-500 hover:text-zinc-300'
               }`}
               onClick={toggleDuplex}
@@ -157,7 +155,6 @@ function App() {
 
           </div>
         </div>
-
 
         {/* Chat Input (Chat/Agent mode) */}
         {(mode === 'chat' || mode === 'agent') && (
