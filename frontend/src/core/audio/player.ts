@@ -137,8 +137,17 @@ export class AudioPlayer {
     }
     this.queue = [];
     this.isPlaying = false;
+    
+    // Resume context if it was suspended for interrupt
+    if (this.audioContext?.state === 'suspended') {
+        this.audioContext.resume().catch(()=>{});
+    }
+    
     try { useAgentStore.getState().setIsAudioPlaying(false); } catch(e) {}
   }
+
+  // NOTE: pauseForInterrupt/resumeAfterInterrupt removed.
+  // FSM architecture uses hard stop() for all interrupts.
 
   setVolume(volume: number) {
     if (this.gainNode) {

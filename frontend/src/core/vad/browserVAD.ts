@@ -85,7 +85,7 @@ export class BrowserVAD {
   private avgRms = 0;
 
   // Callbacks
-  private onSpeechStart: (() => void) | null = null;
+  private onSpeechStart: ((rms: number) => void) | null = null;
   private onSpeechEnd: ((durationMs: number) => void) | null = null;
   private onVADChange: ((isSpeech: boolean) => void) | null = null;
 
@@ -99,8 +99,9 @@ export class BrowserVAD {
   /**
    * Set event callbacks.
    */
-  on(event: 'speech-start', cb: () => void): this;
+  on(event: 'speech-start', cb: (rms: number) => void): this;
   on(event: 'speech-end', cb: (durationMs: number) => void): this;
+
   on(event: 'vad', cb: (isSpeech: boolean) => void): this;
   on(event: string, cb: any): this {
     if (event === 'speech-start') this.onSpeechStart = cb;
@@ -174,7 +175,7 @@ export class BrowserVAD {
             this.silenceRunCount = 0;
             this.speechStartTime = performance.now();
             console.log(`[VAD] 🎙️ Speech started (RMS: ${rms.toFixed(0)}, threshold: ${this.config.energyThreshold})`);
-            this.onSpeechStart?.();
+            this.onSpeechStart?.(rms);
           }
         } else {
           this.speechRunCount = 0; // reset debounce counter

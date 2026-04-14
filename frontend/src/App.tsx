@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Sidebar } from './ui/Sidebar';
 import { Avatar } from './ui/Avatar';
 import { Waveform } from './ui/Waveform';
@@ -8,6 +8,8 @@ import { audioPlayer } from './core/audio/player';
 import { DebugPanel } from './ui/DebugPanel';
 import { TranscriptPanel } from './ui/TranscriptPanel';
 import { useMetrics } from './hooks/useMetrics';
+import { ParticleBackground } from './ui/ParticleBackground';
+import { SettingsPanel } from './ui/SettingsPanel';
 
 const STATE_LABELS: Record<string, string> = {
   idle: 'Ready',
@@ -54,8 +56,6 @@ function App() {
     }
   };
 
-  // ... rest of handlers ...
-
   const handleMicClick = () => {
     audioPlayer.resume();
     if (state === 'idle') {
@@ -83,88 +83,119 @@ function App() {
 
   return (
     <div className="bg-surface text-on-surface min-h-screen overflow-hidden selection:bg-primary/30">
-      {/* ... header ... */}
+      {/* Ambient background particles */}
+      <div className="fixed inset-0 pointer-events-none opacity-40 overflow-hidden">
+        <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-primary/10 blur-[120px] rounded-full animate-pulse"></div>
+        <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-indigo-500/10 blur-[120px] rounded-full animate-pulse" style={{ animationDelay: '2s' }}></div>
+        
+        <ParticleBackground />
+      </div>
+
       <Sidebar />
 
       <main className={`relative h-screen w-full flex flex-col items-center p-6 bg-[var(--color-surface)] overflow-hidden transition-all duration-500 ${layoutPadding}`}>
-        {/* ... environment background ... */}
+        {/* Floating background gradient for the character area */}
+        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] bg-[var(--color-primary)]/5 blur-[150px] rounded-full pointer-events-none"></div>
+
         <Avatar />
         <DebugPanel />
         <Waveform />
 
-        {/* Enhanced Bottom Controls: Larger Pill with Inline Volume Bar */}
-        <div className={`fixed bottom-0 left-1/2 -translate-x-1/2 w-full px-4 pb-10 flex flex-col items-center z-50 transition-all duration-500 md:max-w-2xl ${layoutPadding}`}>
-          <div className="bg-zinc-950/50 backdrop-blur-2xl rounded-full px-8 py-5 flex items-center justify-between w-full shadow-[0_25px_60px_-15px_rgba(0,0,0,0.7)] border border-white/10">
+
+
+        {/* 🚀 PRO DOCK: Three-Zone Professional Layout */}
+        <div className={`fixed bottom-4 left-1/2 -translate-x-1/2 w-[95%] max-w-2xl px-2 z-50 transition-all duration-500 ${layoutPadding}`}>
+          <div className="bg-zinc-950/60 backdrop-blur-2xl rounded-full px-4 py-3 flex items-center justify-between w-full shadow-[0_25px_60px_-15px_rgba(0,0,0,0.8)] border border-white/10 ring-1 ring-white/5">
             
-            {/* Inline Volume Controls */}
-            <div className="flex items-center gap-4 flex-1 max-w-[240px]">
+            {/* ZONE 1: Audio Controls (Left) */}
+            <div className="flex items-center gap-3 flex-1 min-w-0">
               <button 
                 onClick={toggleMute}
-                className={`flex items-center justify-center w-10 h-10 transition-colors ${volume === 0 ? 'text-red-400' : 'text-zinc-500 hover:text-white'}`}
+                className={`flex items-center justify-center w-10 h-10 rounded-full transition-all ${
+                  volume === 0 ? 'bg-red-500/10 text-red-400' : 'text-zinc-400 hover:text-white hover:bg-white/5'
+                }`}
                 title={volume === 0 ? 'Unmute' : 'Mute'}
               >
-                <span className="material-symbols-outlined text-2xl">
+                <span className="material-symbols-outlined text-xl">
                   {volume === 0 ? 'volume_off' : volume < 50 ? 'volume_down' : 'volume_up'}
                 </span>
               </button>
               
-              <div className="relative flex-1 group">
+              <div className="hidden sm:flex flex-1 items-center max-w-[140px]">
                 <input 
                   type="range" 
                   min="0" 
                   max="100" 
                   value={volume} 
                   onChange={(e) => setVolume(Number(e.target.value))}
-                  className="w-full h-2 bg-white/10 rounded-full accent-[var(--color-primary)] outline-none cursor-pointer appearance-none transition-all hover:h-2.5"
+                  className="w-full h-1.5 bg-white/10 rounded-full accent-[var(--color-primary)] cursor-pointer appearance-none transition-all hover:h-2"
                 />
-                <div 
-                  className="absolute left-0 top-0 h-full bg-[var(--color-primary)]/20 pointer-events-none rounded-full" 
-                  style={{ width: `${volume}%` }}
-                ></div>
               </div>
-              <span className="text-[10px] text-zinc-500 font-mono w-6 text-right">{volume}</span>
+              <span className="hidden sm:inline text-[10px] text-zinc-500 font-mono w-6 text-right">{volume}</span>
             </div>
             
-            <div className="flex items-center gap-6 ml-6">
-              {/* Mic Toggle: Larger & More Tactile */}
+            {/* ZONE 2: Primary Interaction (Center) */}
+            <div className="flex items-center justify-center mx-4">
               <button 
-                className="group relative" 
                 onClick={handleMicClick}
+                className="relative group focus:outline-none"
                 title={state === 'idle' ? 'Start Listening' : 'Stop'}
               >
-                <div className={`absolute -inset-4 bg-[var(--color-primary)]/15 rounded-full blur-2xl transition-all ${state !== 'idle' ? 'bg-[var(--color-primary)]/40 scale-125' : 'group-hover:bg-[var(--color-primary)]/25'}`}></div>
-                <div className={`w-16 h-16 rounded-full flex items-center justify-center relative z-10 shadow-2xl group-active:scale-90 transition-transform ${
-                  state === 'error' 
-                    ? 'bg-red-500 shadow-lg shadow-red-500/30'
-                    : state !== 'idle'
-                    ? 'bg-red-500 shadow-lg shadow-red-500/30 animate-pulse'
-                    : 'bg-gradient-to-br from-[var(--color-secondary)] to-[var(--color-primary)] shadow-lg shadow-[var(--color-primary)]/30'
+                {/* Dynamic State Glows */}
+                <div className={`absolute inset-0 rounded-full blur-2xl transition-all duration-500 opacity-0 group-hover:opacity-100 ${
+                  state === 'listening' ? 'bg-emerald-500/20 opacity-100 scale-125' :
+                  state === 'thinking' ? 'bg-amber-500/40 opacity-100 scale-150 animate-pulse' :
+                  state === 'speaking' ? 'bg-[var(--color-primary)]/20 opacity-100 scale-125' :
+                  'bg-[var(--color-primary)]/10'
+                }`}></div>
+
+                {/* Primary Button Core */}
+                <div className={`w-14 h-14 rounded-full flex items-center justify-center relative z-10 shadow-2xl transition-all duration-300 transform group-active:scale-90 ${
+                  state === 'error' ? 'bg-red-500' :
+                  state === 'interrupting' ? 'bg-red-500 animate-[pulse_0.5s_infinite] shadow-lg shadow-red-500/50' :
+                  state === 'listening' ? 'bg-emerald-500 shadow-emerald-500/30 animate-pulse' :
+                  state === 'thinking' ? 'bg-amber-500 shadow-amber-500/30' :
+                  state === 'speaking' ? 'bg-[var(--color-primary)] shadow-[var(--color-primary)]/30 scale-105' :
+                  'bg-white/10 hover:bg-white/20 text-white'
                 }`}>
-                  <span className="material-symbols-outlined text-white text-3xl" style={{ fontVariationSettings: "'FILL' 1" }}>
-                    {state !== 'idle' ? 'stop' : 'mic'}
+                  <span className="material-symbols-outlined text-2xl" style={{ fontVariationSettings: "'FILL' 1" }}>
+                    {state === 'idle' ? 'mic' : state === 'listening' ? 'graphic_eq' : 'stop'}
                   </span>
                 </div>
-              </button>
 
-              {/* Stop AI */}
+                {/* Duplex Pulse Indicator */}
+                {duplexEnabled && (
+                  <div className="absolute -inset-1 rounded-full border border-emerald-500/20 animate-[ping_3s_infinite] pointer-events-none"></div>
+                )}
+              </button>
+            </div>
+
+            {/* ZONE 3: System Controls (Right) */}
+            <div className="flex items-center gap-2 flex-1 justify-end">
+              {/* Stop AI Action */}
               <button 
-                className="flex items-center justify-center w-12 h-12 text-zinc-500 hover:text-red-400 transition-colors disabled:opacity-10" 
+                className="w-10 h-10 flex items-center justify-center text-zinc-400 hover:text-red-400 hover:bg-red-500/5 rounded-full transition-colors disabled:opacity-0" 
                 onClick={stopPipeline} 
                 title="Stop AI"
                 disabled={state === 'idle'}
               >
-                <span className="material-symbols-outlined text-3xl">stop_circle</span>
+                <span className="material-symbols-outlined text-2xl">stop_circle</span>
               </button>
 
               {/* Duplex Toggle */}
               <button 
-                className={`flex items-center justify-center w-12 h-12 transition-all rounded-full ${
-                  duplexEnabled ? 'text-emerald-400 bg-emerald-400/10' : 'text-zinc-500 hover:text-zinc-300'
+                className={`w-10 h-10 flex items-center justify-center transition-all rounded-full ${
+                  duplexEnabled ? 'text-emerald-400 bg-emerald-500/10' : 'text-zinc-500 hover:text-zinc-300 hover:bg-white/5'
                 }`}
                 onClick={toggleDuplex}
                 title={duplexEnabled ? 'Duplex: ON' : 'Duplex: OFF'}
               >
-                <span className="material-symbols-outlined text-3xl" style={duplexEnabled ? { fontVariationSettings: "'FILL' 1" } : {}}>bolt</span>
+                <div className="relative">
+                  <span className="material-symbols-outlined text-2xl" style={duplexEnabled ? { fontVariationSettings: "'FILL' 1" } : {}}>bolt</span>
+                  {duplexEnabled && (
+                    <span className="absolute -top-1 -right-1 w-2 h-2 bg-emerald-500 rounded-full border border-zinc-950"></span>
+                  )}
+                </div>
               </button>
             </div>
 
@@ -193,24 +224,8 @@ function App() {
       {/* Transcript Panel (Right Side) */}
       <TranscriptPanel />
 
-      {/* BottomNavBar (Mobile Only) */}
-      <nav className="md:hidden fixed bottom-0 left-1/2 -translate-x-1/2 w-full px-4 pb-8 flex justify-around items-center z-50">
-        <div className="flex items-center justify-around w-full max-w-md mx-auto mb-6 bg-zinc-950/20 backdrop-blur-md rounded-t-[2.5rem] py-4">
-          <div className="flex flex-col items-center justify-center text-zinc-500">
-            <span className="material-symbols-outlined">mic</span>
-            <span className="font-manrope font-medium text-[10px]">Listen</span>
-          </div>
-          <div className="flex flex-col items-center justify-center bg-indigo-500/20 text-indigo-200 rounded-full w-14 h-14">
-            <span className="material-symbols-outlined" style={{ fontVariationSettings: "'FILL' 1" }}>flare</span>
-            <span className="font-manrope font-medium text-[10px]">Think</span>
-          </div>
-          <div className="flex flex-col items-center justify-center text-zinc-500">
-            <span className="material-symbols-outlined">terminal</span>
-            <span className="font-manrope font-medium text-[10px]">Command</span>
-          </div>
-        </div>
-      </nav>
-
+      {/* Settings Overlay */}
+      <SettingsPanel />
     </div>
   );
 }

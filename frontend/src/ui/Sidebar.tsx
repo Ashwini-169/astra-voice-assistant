@@ -7,13 +7,21 @@ const MODES: { key: AppMode; icon: string; label: string }[] = [
   { key: 'agent', icon: 'psychology', label: 'Agent' },
 ];
 
+import { useSettingsStore } from '../core/state/settingsStore';
+
 const NAV_ITEMS = [
   { icon: 'memory', label: 'Memory' },
-  { icon: 'settings', label: 'Settings' },
+  { icon: 'settings', label: 'Settings' }
 ];
 
 export const Sidebar: React.FC = () => {
   const { mode, setMode, showDebug, setShowDebug } = useAgentStore();
+
+  const handleNavClick = (label: string) => {
+    if (label === 'Settings') {
+      useSettingsStore.getState().setSettingsOpen(true);
+    }
+  };
 
   return (
     <aside className="fixed left-0 top-0 h-full py-12 z-40 hidden md:flex flex-col items-center bg-zinc-950/40 backdrop-blur-xl w-20 rounded-r-3xl shadow-[0_0_40px_rgba(99,102,241,0.08)]">
@@ -24,7 +32,6 @@ export const Sidebar: React.FC = () => {
         </div>
       </div>
 
-      {/* Mode Switcher */}
       <div className="flex flex-col gap-2 mb-8 p-1.5 bg-zinc-900/50 rounded-2xl border border-white/5">
         {MODES.map((m) => (
           <button
@@ -50,6 +57,7 @@ export const Sidebar: React.FC = () => {
         {NAV_ITEMS.map((item) => (
           <button
             key={item.label}
+            onClick={() => handleNavClick(item.label)}
             className="text-zinc-600 hover:text-zinc-300 transition-all flex flex-col items-center gap-1 group"
           >
             <span className="material-symbols-outlined">{item.icon}</span>

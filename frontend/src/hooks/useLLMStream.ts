@@ -8,15 +8,21 @@ import { useSettingsStore } from '../core/state/settingsStore';
 import { cleanForSpeech } from '../core/utils/cleanForSpeech';
 
 /**
- * LLM Streaming hook with:
- * - First-token latency tracking
- * - Sentence-boundary TTS chunking with debounce
- * - onStreamComplete callback for duplex auto-relisten
- * - AbortController for cancelling stale streams
+ * LLM Streaming hook — stream-versioned, preemptive.
+ *
+ * Architecture:
+ *   - Every handleStream() call gets a unique streamId
+ *   - Stale streams are silently discarded at every async boundary
+ *   - TTS chunks carry their streamId and are rejected if stale
+ *   - interrupt() is a mechanical kill switch — no state management
+ *     (state transitions are owned by the FSM in useVoicePipeline)
+ *   - onStreamComplete callback fires ONCE when TTS queue drains
  */
 export const useLLMStream = () => {
   const { appendResponse, setState, addMessage, setFirstTokenLatency } = useAgentStore();
   const { provider, model } = useSettingsStore();
+
+  const currentStreamIdRef = useRef(0);
   const bufferRef = useRef('');
   const abortRef = useRef(false);
   const controllerRef = useRef<AbortController | null>(null);
@@ -31,24 +37,31 @@ export const useLLMStream = () => {
   }, []);
 
   /**
-   * Send buffered text to TTS and play audio in the browser.
-   * Primary: backend /synthesize → MP3 → AudioPlayer
-   * Fallback: browser speechSynthesis
+   * Synthesize and play a text chunk.
+   * Silently aborts if streamId is stale (a newer request has started).
    */
-  const speakInBrowser = useCallback(async (rawText: string) => {
-    if (!rawText.trim() || abortRef.current) return;
-    // Strip markdown/symbols for speech, but UI keeps the original
+  const speakInBrowser = useCallback(async (rawText: string, streamId: number) => {
+    // Pre-check: bail if stale
+    if (!rawText.trim() || abortRef.current || streamId !== currentStreamIdRef.current) return;
+
     const speechText = cleanForSpeech(rawText);
     if (!speechText.trim()) return;
+
     try {
       const audioBlob = await synthesizeAudio(speechText);
-      if (audioBlob.size > 0 && !abortRef.current) {
+
+      // Post-check: bail if stale (synthesis took time, new stream may have started)
+      if (streamId !== currentStreamIdRef.current || abortRef.current) return;
+
+      if (audioBlob.size > 0) {
         await audioPlayer.play(audioBlob);
       }
     } catch (e) {
       console.warn('[TTS] Backend synthesize failed, falling back to browser TTS:', e);
       try {
-        if (!abortRef.current) await browserTTS.speak(speechText);
+        if (streamId === currentStreamIdRef.current && !abortRef.current) {
+          await browserTTS.speak(speechText);
+        }
       } catch (e2) {
         console.error('[TTS] Browser TTS also failed:', e2);
       }
@@ -56,21 +69,31 @@ export const useLLMStream = () => {
   }, []);
 
   const handleStream = useCallback(async (query: string) => {
+    // ═══ PREEMPT: Kill any active stream + audio ═══
+    currentStreamIdRef.current += 1;
+    const streamId = currentStreamIdRef.current;
+
+    abortRef.current = true;       // signal old speakInBrowser calls to bail
+    audioPlayer.stop();            // destroy audio queue
+    browserTTS.stop();             // kill browser speech
+    controllerRef.current?.abort(); // abort old fetch
+
+    // New stream state
     setState('thinking');
     bufferRef.current = '';
-    abortRef.current = false;
+    abortRef.current = false;       // re-enable for new stream
     firstTokenRef.current = false;
     streamStartRef.current = performance.now();
 
-    // Cancel any previous in-flight stream
-    controllerRef.current?.abort();
     controllerRef.current = new AbortController();
-    
-    // Clear the queue empty callback to prevent old sessions from firing prematurely mid-stream
-    audioPlayer.onQueueEmpty = null;
-    
+    audioPlayer.onQueueEmpty = null; // clear stale callback
+
     try {
       const response = await generateStream(query, provider, model);
+
+      // Stale check: another handleStream may have fired while we awaited
+      if (streamId !== currentStreamIdRef.current) return;
+
       if (!response.ok) {
         console.error('LLM returned', response.status, await response.text());
         setState('error');
@@ -78,19 +101,23 @@ export const useLLMStream = () => {
         return;
       }
       if (!response.body) throw new Error('No readable stream');
-      
+
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
-      
+
       setState('speaking');
 
       let fullResponse = '';
       let leftover = '';
+
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
         if (abortRef.current) break;
-        
+
+        // ═══ STALE GUARD: bail if a newer stream has started ═══
+        if (streamId !== currentStreamIdRef.current) break;
+
         const chunk = decoder.decode(value, { stream: true });
         const lines = (leftover + chunk).split('\n');
         leftover = lines.pop() || '';
@@ -112,8 +139,8 @@ export const useLLMStream = () => {
               appendResponse(token);
               fullResponse += token;
               bufferRef.current += token;
-              
-              // TTS sentence-boundary sync: flush on sentence-ending punctuation or buffer length
+
+              // Flush on sentence boundary or buffer length
               const trimmed = bufferRef.current.trimEnd();
               if (
                 trimmed.endsWith('.') ||
@@ -124,14 +151,13 @@ export const useLLMStream = () => {
               ) {
                 const sentenceToSpeak = bufferRef.current;
                 bufferRef.current = '';
-                // Chain TTS calls to maintain order but don't block stream
                 ttsQueueRef.current = ttsQueueRef.current.then(() =>
-                  speakInBrowser(sentenceToSpeak)
+                  speakInBrowser(sentenceToSpeak, streamId)
                 );
               }
             }
           } catch {
-            // Not JSON — might be raw text from non-NDJSON backend
+            // Non-JSON fallback
             appendResponse(line);
             fullResponse += line;
             bufferRef.current += line;
@@ -140,33 +166,31 @@ export const useLLMStream = () => {
       }
 
       // Flush remaining buffer
-      if (bufferRef.current.trim().length > 0 && !abortRef.current) {
+      if (bufferRef.current.trim().length > 0 && !abortRef.current && streamId === currentStreamIdRef.current) {
         const remaining = bufferRef.current;
         bufferRef.current = '';
         ttsQueueRef.current = ttsQueueRef.current.then(() =>
-          speakInBrowser(remaining)
+          speakInBrowser(remaining, streamId)
         );
       }
 
       // Add assistant message to chat history
-      if (fullResponse.trim() && !abortRef.current) {
+      if (fullResponse.trim() && !abortRef.current && streamId === currentStreamIdRef.current) {
         addMessage({ role: 'assistant', content: fullResponse });
       }
-      
-      // We wait for the API calls to finish queueing.
-      // The actual transition to 'idle'/relisten happens in audioPlayer.onQueueEmpty.
+
+      // ═══ END-OF-STREAM: Wait for TTS queue to drain, then signal complete ═══
       ttsQueueRef.current = ttsQueueRef.current.then(() => {
-        if (abortRef.current) return;
-        
-        // If there's nothing playing/queued, transition immediately
+        // Final stale check
+        if (abortRef.current || streamId !== currentStreamIdRef.current) return;
+
         if (audioPlayer.queueLength === 0) {
-          setState('idle');
+          // Nothing queued → fire immediately
           onCompleteRef.current?.();
         } else {
-          // Otherwise, overwrite onQueueEmpty to transition when playback fully concludes
+          // Wait for last audio chunk to finish
           audioPlayer.onQueueEmpty = () => {
-            if (!abortRef.current) {
-              setState('idle');
+            if (!abortRef.current && streamId === currentStreamIdRef.current) {
               onCompleteRef.current?.();
             }
           };
@@ -184,9 +208,13 @@ export const useLLMStream = () => {
     }
   }, [provider, model, appendResponse, setState, speakInBrowser, addMessage, setFirstTokenLatency]);
 
+  /**
+   * Mechanical kill switch.
+   * Stops all audio, aborts LLM fetch, cancels backend generation.
+   * Does NOT manage FSM state — that's the pipeline's job.
+   */
   const interrupt = useCallback(async () => {
     abortRef.current = true;
-    setState('interrupting');
     audioPlayer.stop();
     browserTTS.stop();
     controllerRef.current?.abort();
@@ -194,8 +222,8 @@ export const useLLMStream = () => {
       stopGeneration().catch(() => {}),
       stopTTS().catch(() => {}),
     ]);
-    setState('idle');
-  }, [setState]);
+    // NOTE: No setState here. The FSM in useVoicePipeline owns all transitions.
+  }, []);
 
   return { handleStream, interrupt, setOnStreamComplete };
 };
