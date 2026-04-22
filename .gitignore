@@ -29,5 +29,8 @@ pytest-cache-files-*/
 .vscode/
 .idea/
 
+# Private local agent notes/config
+.claude/
+
 # Local model/download caches
 .hf_cache/
