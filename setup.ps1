@@ -6,6 +6,12 @@ $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $venvPython = Join-Path $root "venv\python.exe"
 
 Push-Location $root
+$hfCacheRoot = Join-Path $root ".hf_cache"
+$hfHubCache = Join-Path $hfCacheRoot "hub"
+if (-not (Test-Path $hfCacheRoot)) { New-Item -Path $hfCacheRoot -ItemType Directory | Out-Null }
+if (-not (Test-Path $hfHubCache)) { New-Item -Path $hfHubCache -ItemType Directory | Out-Null }
+$env:HF_HOME = $hfCacheRoot
+$env:HUGGINGFACE_HUB_CACHE = $hfHubCache
 
 if (-not (Test-Path $venvPython)) {
     Write-Host "Creating venv at .\venv ..."
@@ -47,6 +53,7 @@ if ($PullModel) {
 }
 
 Write-Host "Setup complete."
+Write-Host "HF cache directory: $hfCacheRoot (reused across runs; avoids re-downloading models)."
 Write-Host "Next: .\start_stack.ps1"
 
 Pop-Location

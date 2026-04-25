@@ -1,0 +1,67 @@
+{
+  "mcpServers": {
+    "time": {
+      "command": "docker",
+      "args": [
+        "run",
+        "-i",
+        "--rm",
+        "mcp/time"
+      ],
+      "env": {},
+      "autoStart": true
+    },
+    "fetch": {
+      "command": "docker",
+      "args": [
+        "run",
+        "-i",
+        "--rm",
+        "mcp/fetch"
+      ],
+      "env": {},
+      "autoStart": true
+    },
+    "obsidian": {
+      "command": "docker",
+      "args": [
+        "run",
+        "-i",
+        "--rm",
+        "-e",
+        "OBSIDIAN_API_KEY=6ceb539a63ff638b05a9d4b988b2171f9590546fbc0cd26a4d7d98f66c9c3a16",
+        "-v",
+        "C:/Users/hp/Documents/ObsidianVault:/vault",
+        "mcp/obsidian"
+      ],
+      "env": {
+        "OBSIDIAN_HOST": "host.docker.internal",
+        "OBSIDIAN_PORT": "27123",
+        "OBSIDIAN_API_KEY": "6ceb539a63ff638b05a9d4b988b2171f9590546fbc0cd26a4d7d98f66c9c3a16"
+      },
+      "autoStart": true
+    },
+    "duckduckgo": {
+      "command": "docker",
+      "args": [
+        "run",
+        "-i",
+        "--rm",
+        "mcp/duckduckgo"
+      ],
+      "env": {},
+      "autoStart": true
+    },
+    "youtube_transcript": {
+      "command": "docker",
+      "args": [
+        "run",
+        "-i",
+        "--rm",
+        "mcp/youtube_transcript"
+      ],
+      "env": {},
+      "autoStart": true
+    }
+  }
+}

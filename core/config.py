@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     tts_host: str = Field(default="0.0.0.0")
     tts_port: int = Field(default=8003)
     piper_api_url: AnyHttpUrl = Field(default="http://127.0.0.1:59125")
+    piper_voice: str = Field(default="en_US-lessac-medium")
+    piper_speaker_id: int | None = Field(default=None)
 
     intent_host: str = Field(default="0.0.0.0")
     intent_port: int = Field(default=8004)
@@ -40,6 +42,11 @@ class Settings(BaseSettings):
     # "fish_speech" passes emotion tags natively to OpenAudio S1 Mini
     tts_backend: str = Field(default="edge")
     fish_speech_api_url: AnyHttpUrl = Field(default="http://127.0.0.1:8080")
+    tts_edge_offline_fallback_enabled: bool = Field(default=True)
+    tts_edge_offline_check_url: str = Field(default="https://www.microsoft.com")
+    tts_edge_offline_check_timeout_sec: float = Field(default=0.5)
+    tts_edge_offline_state_ttl_sec: float = Field(default=3.0)
+    tts_edge_timeout_sec: float = Field(default=1.5)
 
     class Config:
         env_prefix = "AI_ASSISTANT_"

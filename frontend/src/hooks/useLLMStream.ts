@@ -1,9 +1,10 @@
 import { useCallback, useRef } from 'react';
-import { generateStream, stopGeneration } from '../core/api/llm';
+import { generateStream, stopGeneration, callAgentLoop } from '../core/api/llm';
 import { synthesizeAudio, stopTTS } from '../core/api/tts';
 import { audioPlayer } from '../core/audio/player';
 import { browserTTS } from '../core/audio/browserTTS';
 import { useAgentStore } from '../core/state/agentStore';
+import type { AppMode } from '../core/state/agentStore';
 import { useSettingsStore } from '../core/state/settingsStore';
 import { cleanForSpeech } from '../core/utils/cleanForSpeech';
 
@@ -19,7 +20,7 @@ import { cleanForSpeech } from '../core/utils/cleanForSpeech';
  *   - onStreamComplete callback fires ONCE when TTS queue drains
  */
 export const useLLMStream = () => {
-  const { appendResponse, setState, addMessage, setFirstTokenLatency } = useAgentStore();
+  const { appendResponse, setState, setResponse, addMessage, setFirstTokenLatency } = useAgentStore();
   const { provider, model } = useSettingsStore();
 
   const currentStreamIdRef = useRef(0);
@@ -68,10 +69,23 @@ export const useLLMStream = () => {
     }
   }, []);
 
-  const handleStream = useCallback(async (query: string) => {
+  const handleStream = useCallback(async (
+    query: string,
+    modeSnapshot?: AppMode,
+    source: string = 'unknown',
+    isFinal?: boolean,
+  ) => {
+    const trimmedQuery = query.trim();
+    if (trimmedQuery.length < 3) {
+      console.log('[Dispatch] ignored short text', { source, isFinal, text: trimmedQuery });
+      return;
+    }
+
     // ═══ PREEMPT: Kill any active stream + audio ═══
     currentStreamIdRef.current += 1;
     const streamId = currentStreamIdRef.current;
+    const mode = modeSnapshot ?? useAgentStore.getState().mode;
+    console.log('[Dispatch]', { mode, source, isFinal, text: trimmedQuery });
 
     abortRef.current = true;       // signal old speakInBrowser calls to bail
     audioPlayer.stop();            // destroy audio queue
@@ -80,16 +94,60 @@ export const useLLMStream = () => {
 
     // New stream state
     setState('thinking');
+    setResponse('');
     bufferRef.current = '';
     abortRef.current = false;       // re-enable for new stream
     firstTokenRef.current = false;
     streamStartRef.current = performance.now();
 
-    controllerRef.current = new AbortController();
+    const controller = new AbortController();
+    controllerRef.current = controller;
     audioPlayer.onQueueEmpty = null; // clear stale callback
 
     try {
-      const response = await generateStream(query, provider, model);
+      if (mode === 'agent') {
+        console.log(`%c[LLM Agent] 🧠 Chat sent to LLM: "${query}"`, 'color: #0ea5e9; font-weight: bold;');
+        const result = await callAgentLoop(trimmedQuery, provider, model, controller.signal);
+        const finalResponse = result.response || "No response";
+        
+        // Output trace to Browser Console!
+        if (result.steps && result.steps.length > 0) {
+            result.steps.forEach((step: any) => {
+                console.log(`%c[LLM Tool Execution] 🛠️ ${step.tool.server}/${step.tool.name}`, 'color: #f59e0b; font-weight: bold;');
+                console.log('Arguments:', step.arguments);
+                console.log('Result:', typeof step.result === 'object' && step.result.result ? step.result.result : step.result);
+            });
+        }
+        
+        // Stale check
+        if (streamId !== currentStreamIdRef.current) return;
+        setState('speaking');
+        
+        if (!firstTokenRef.current) {
+          firstTokenRef.current = true;
+          const latency = performance.now() - streamStartRef.current;
+          setFirstTokenLatency(Math.round(latency));
+          console.log(`%c[LLM Agent] ⚡ Total Request Latency: ${latency.toFixed(0)}ms`, 'color: #10b981; font-weight: bold;');
+        }
+
+        appendResponse(finalResponse);
+        if (finalResponse.trim() && !abortRef.current && streamId === currentStreamIdRef.current) {
+          addMessage({ role: 'assistant', content: finalResponse });
+        }
+
+        ttsQueueRef.current = ttsQueueRef.current.then(() =>
+          speakInBrowser(finalResponse, streamId)
+        );
+
+        ttsQueueRef.current = ttsQueueRef.current.then(() => {
+          if (abortRef.current || streamId !== currentStreamIdRef.current) return;
+          if (audioPlayer.queueLength === 0) onCompleteRef.current?.();
+          else audioPlayer.onQueueEmpty = () => { if (!abortRef.current && streamId === currentStreamIdRef.current) onCompleteRef.current?.(); };
+        });
+        return;
+      }
+
+      const response = await generateStream(trimmedQuery, provider, model, controller.signal);
 
       // Stale check: another handleStream may have fired while we awaited
       if (streamId !== currentStreamIdRef.current) return;
@@ -206,7 +264,7 @@ export const useLLMStream = () => {
         setTimeout(() => setState('idle'), 2000);
       }
     }
-  }, [provider, model, appendResponse, setState, speakInBrowser, addMessage, setFirstTokenLatency]);
+  }, [provider, model, appendResponse, setState, setResponse, speakInBrowser, addMessage, setFirstTokenLatency]);
 
   /**
    * Mechanical kill switch.
@@ -215,6 +273,7 @@ export const useLLMStream = () => {
    */
   const interrupt = useCallback(async () => {
     abortRef.current = true;
+    currentStreamIdRef.current += 1;
     audioPlayer.stop();
     browserTTS.stop();
     controllerRef.current?.abort();

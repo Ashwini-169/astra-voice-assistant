@@ -11,6 +11,7 @@ import asyncio
 import io
 import logging
 import threading
+import time
 from typing import Any, Dict, Optional
 
 import numpy as np
@@ -74,7 +75,14 @@ _EDGE_EMOTION_VOICES: Dict[str, str] = {
 class TTSRuntimeSettings(BaseModel):
     backend: str = "edge"
     piper_api_url: str = "http://127.0.0.1:59125"
+    piper_voice: str = "en_US-lessac-medium"
+    piper_speaker_id: Optional[int] = None
     fish_speech_api_url: str = "http://127.0.0.1:8080"
+    edge_offline_fallback_enabled: bool = True
+    edge_offline_check_url: str = "https://www.microsoft.com"
+    edge_offline_check_timeout_sec: float = 0.5
+    edge_offline_state_ttl_sec: float = 3.0
+    edge_timeout_sec: float = 1.5
     edge_default_voice: str = _EDGE_DEFAULT_VOICE
     edge_base_rate_pct: int = 8
     chunk_initial_words: int = 5
@@ -85,7 +93,14 @@ class TTSRuntimeSettings(BaseModel):
 class TTSSettingsUpdate(BaseModel):
     backend: Optional[str] = None
     piper_api_url: Optional[str] = None
+    piper_voice: Optional[str] = None
+    piper_speaker_id: Optional[int] = None
     fish_speech_api_url: Optional[str] = None
+    edge_offline_fallback_enabled: Optional[bool] = None
+    edge_offline_check_url: Optional[str] = None
+    edge_offline_check_timeout_sec: Optional[float] = None
+    edge_offline_state_ttl_sec: Optional[float] = None
+    edge_timeout_sec: Optional[float] = None
     edge_default_voice: Optional[str] = None
     edge_base_rate_pct: Optional[int] = None
     chunk_initial_words: Optional[int] = None
@@ -114,7 +129,14 @@ def _default_runtime_settings() -> TTSRuntimeSettings:
     return TTSRuntimeSettings(
         backend=settings.tts_backend.lower(),
         piper_api_url=str(settings.piper_api_url).rstrip("/"),
+        piper_voice=settings.piper_voice,
+        piper_speaker_id=settings.piper_speaker_id,
         fish_speech_api_url=str(settings.fish_speech_api_url).rstrip("/"),
+        edge_offline_fallback_enabled=settings.tts_edge_offline_fallback_enabled,
+        edge_offline_check_url=settings.tts_edge_offline_check_url,
+        edge_offline_check_timeout_sec=settings.tts_edge_offline_check_timeout_sec,
+        edge_offline_state_ttl_sec=settings.tts_edge_offline_state_ttl_sec,
+        edge_timeout_sec=settings.tts_edge_timeout_sec,
         edge_default_voice=_EDGE_DEFAULT_VOICE,
         edge_base_rate_pct=8,
         chunk_initial_words=5,
@@ -129,6 +151,44 @@ _runtime_settings = _default_runtime_settings()
 def _load_runtime_settings() -> TTSRuntimeSettings:
     with _runtime_lock:
         return _runtime_settings.model_copy(deep=True)
+
+
+class _NetworkState:
+    def __init__(self):
+        self._online = True
+        self._last_check = 0.0
+        self._lock = asyncio.Lock()
+
+    async def get_status(self, runtime: TTSRuntimeSettings) -> bool:
+        ttl = max(0.1, float(runtime.edge_offline_state_ttl_sec))
+        now = time.monotonic()
+        if now - self._last_check <= ttl:
+            return self._online
+
+        async with self._lock:
+            now = time.monotonic()
+            if now - self._last_check <= ttl:
+                return self._online
+            self._online = await self._probe(runtime)
+            self._last_check = now
+            return self._online
+
+    async def _probe(self, runtime: TTSRuntimeSettings) -> bool:
+        def _head() -> bool:
+            try:
+                response = _http_session.head(
+                    runtime.edge_offline_check_url,
+                    timeout=max(0.1, float(runtime.edge_offline_check_timeout_sec)),
+                    allow_redirects=True,
+                )
+                return response.status_code < 500
+            except Exception:
+                return False
+
+        return await asyncio.to_thread(_head)
+
+
+_network_state = _NetworkState()
 
 
 def _decode_mp3(mp3_bytes: bytes) -> Optional[np.ndarray]:
@@ -223,17 +283,48 @@ def _speak_piper(payload: Dict[str, Any]) -> requests.Response:
     """Send plain stripped text to Piper TTS server."""
     runtime = _load_runtime_settings()
     clean_text = strip_emotion_tags(payload["text"])
+    piper_payload: Dict[str, Any] = {"text": clean_text, "voice": runtime.piper_voice}
+    if runtime.piper_speaker_id is not None:
+        piper_payload["speaker_id"] = runtime.piper_speaker_id
     try:
         response = _http_session.post(
             f"{runtime.piper_api_url}/synthesize",
-            json={"text": clean_text},
+            json=piper_payload,
             timeout=15,
         )
+        if response.status_code in {400, 404, 422}:
+            logger.info("[tts] Piper rejected voice payload; retrying legacy text-only request")
+            response = _http_session.post(
+                f"{runtime.piper_api_url}/synthesize",
+                json={"text": clean_text},
+                timeout=15,
+            )
         response.raise_for_status()
         return response
     except Exception as exc:  # pylint: disable=broad-except
         logger.error("Piper request failed: %s", exc)
         raise HTTPException(status_code=502, detail="Piper TTS backend unavailable") from exc
+
+
+async def _route_edge_with_fallback(payload: Dict[str, Any]) -> Dict[str, Any]:
+    runtime = _load_runtime_settings()
+    if not runtime.edge_offline_fallback_enabled:
+        result = await _speak_edge(payload)
+        return {"result": result, "backend": "edge"}
+
+    is_online = await _network_state.get_status(runtime)
+    if not is_online:
+        logger.info("[tts] offline detected -> piper fallback")
+        piper_response = _speak_piper(payload)
+        return {"result": {"status_code": piper_response.status_code}, "backend": "piper"}
+
+    try:
+        result = await asyncio.wait_for(_speak_edge(payload), timeout=max(0.2, float(runtime.edge_timeout_sec)))
+        return {"result": result, "backend": "edge"}
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning("[tts] edge failed (%s) -> piper fallback", exc)
+        piper_response = _speak_piper(payload)
+        return {"result": {"status_code": piper_response.status_code}, "backend": "piper"}
 
 
 def _speak_fish_speech(payload: Dict[str, Any]) -> requests.Response:
@@ -271,6 +362,19 @@ async def synthesize(request: SynthesizeRequest):
         return FastAPIResponse(content=b"", media_type="audio/mpeg")
 
     runtime = _load_runtime_settings()
+    payload = {"text": request.text, "emotion": request.emotion}
+    if runtime.backend.lower() == "piper":
+        response = _speak_piper(payload)
+        media_type = response.headers.get("content-type", "audio/wav")
+        return FastAPIResponse(content=response.content, media_type=media_type)
+    if runtime.backend.lower() == "edge" and runtime.edge_offline_fallback_enabled:
+        is_online = await _network_state.get_status(runtime)
+        if not is_online:
+            logger.info("[tts] /synthesize offline detected -> piper fallback")
+            response = _speak_piper(payload)
+            media_type = response.headers.get("content-type", "audio/wav")
+            return FastAPIResponse(content=response.content, media_type=media_type)
+
     emotion = request.emotion
     default_voice = runtime.edge_default_voice or _EDGE_DEFAULT_VOICE
     voice = _EDGE_EMOTION_VOICES.get(emotion, default_voice) if emotion else default_voice
@@ -307,6 +411,11 @@ async def synthesize(request: SynthesizeRequest):
         )
         return FastAPIResponse(content=mp3_bytes, media_type="audio/mpeg")
     except Exception as exc:  # pylint: disable=broad-except
+        if runtime.edge_offline_fallback_enabled:
+            logger.warning("[tts] /synthesize edge failed (%s) -> piper fallback", exc)
+            response = _speak_piper(payload)
+            media_type = response.headers.get("content-type", "audio/wav")
+            return FastAPIResponse(content=response.content, media_type=media_type)
         logger.error("Edge TTS synthesize failed: %s", exc)
         raise HTTPException(status_code=502, detail=f"Edge TTS failed: {exc}") from exc
 
@@ -353,8 +462,8 @@ async def speak(request: SpeakRequest) -> SpeakResponse:
 
     if backend == "edge":
         logger.info("[tts] edge backend | emotion=%s | chunk=%d | %.60s", request.emotion, chunk_id, request.text)
-        result = await _speak_edge(payload)
-        return SpeakResponse(accepted=True, backend_status=result["status_code"], backend=backend)
+        route = await _route_edge_with_fallback(payload)
+        return SpeakResponse(accepted=True, backend_status=route["result"]["status_code"], backend=route["backend"])
 
     if backend == "fish_speech":
         logger.info("[tts] fish_speech backend | emotion=%s | %.60s", request.emotion, request.text)
@@ -419,6 +528,17 @@ async def update_runtime_settings(update: TTSSettingsUpdate):
             raise HTTPException(status_code=400, detail="chunk_steady_words must be >= chunk_initial_words")
         if int(current["chunk_max_chars"]) < 40:
             raise HTTPException(status_code=400, detail="chunk_max_chars must be >= 40")
+        current["piper_voice"] = str(current["piper_voice"]).strip()
+        if not current["piper_voice"]:
+            raise HTTPException(status_code=400, detail="piper_voice must not be empty")
+        if current["piper_speaker_id"] is not None and int(current["piper_speaker_id"]) < 0:
+            raise HTTPException(status_code=400, detail="piper_speaker_id must be >= 0")
+        if float(current["edge_offline_check_timeout_sec"]) <= 0:
+            raise HTTPException(status_code=400, detail="edge_offline_check_timeout_sec must be > 0")
+        if float(current["edge_offline_state_ttl_sec"]) <= 0:
+            raise HTTPException(status_code=400, detail="edge_offline_state_ttl_sec must be > 0")
+        if float(current["edge_timeout_sec"]) <= 0:
+            raise HTTPException(status_code=400, detail="edge_timeout_sec must be > 0")
 
         globals()["_runtime_settings"] = TTSRuntimeSettings(**current)
 

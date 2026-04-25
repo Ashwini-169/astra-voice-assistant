@@ -5,6 +5,9 @@ from typing import Any, Dict, Iterator, List
 import requests
 
 _http_session = requests.Session()
+_http_session.headers.update({
+    "User-Agent": "AstraAssistant/1.0 (https://github.com/Ashwini-169/astra-voice-assistant; support@example.com)"
+})
 
 
 def extract_openai_content(data: Dict[str, Any]) -> str:

@@ -5,11 +5,12 @@ import os
 import threading
 import time
 import uuid
-from typing import Any, Dict, Iterator, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel as PydanticBaseModel
 
 from core.config import get_settings
 from services.llm_metrics import llm_metrics
@@ -29,13 +30,16 @@ from services.mcp_tools import (
     builtin_servers,
     call_tool,
     delete_server,
+    is_tool_allowed,
     list_servers,
     list_tools,
+    set_server_enabled,
     tool_browser_search,
     tool_file_search,
     tool_music_control,
     upsert_server,
 )
+from services.mcp_docker_bridge import mcp_bridge
 from services.providers.common import _http_session
 from services.providers.ollama import KEEP_ALIVE
 from services.router import build_request_context, generate_non_stream, generate_stream, health as provider_health, list_models as provider_models
@@ -77,6 +81,204 @@ def _default_runtime_settings() -> RuntimeSettings:
 _runtime_settings = _default_runtime_settings()
 _settings_lock = threading.Lock()
 
+# Keep agent iterations short to avoid tool-call loops.
+AGENT_MAX_STEPS = 2
+
+# Server-level toggles used by agent/tool routing.
+TOOLS: Dict[str, Dict[str, Any]] = {
+    "duckduckgo": {"enabled": True, "tools": ["search", "fetch_content"]},
+}
+
+
+def _is_server_enabled(server: str) -> bool:
+    cfg = TOOLS.get(server)
+    if cfg is None:
+        return True
+    return bool(cfg.get("enabled", True))
+
+
+def _classify_error(status_code: int, message: str) -> str:
+    msg = (message or "").lower()
+    if status_code == 404:
+        return "not_found"
+    if status_code == 401:
+        return "auth"
+    if status_code in {408, 504}:
+        return "timeout"
+    if status_code in {400, 422}:
+        return "validation"
+    if status_code in {502, 503}:
+        if any(token in msg for token in ("connect", "connection", "refused", "unreachable")):
+            return "connection"
+        return "server"
+    if status_code >= 500:
+        return "server"
+    return "unknown"
+
+
+def _build_tool_specs() -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    tool_specs: List[Dict[str, Any]] = []
+    unavailable_servers: List[Dict[str, Any]] = []
+
+    servers = list_servers()
+    for server in servers["builtin"]:
+        if not server.get("enabled", True):
+            unavailable_servers.append(
+                {
+                    "server": server.get("name"),
+                    "type": "builtin",
+                    "status": "disabled",
+                    "reason": "server disabled",
+                }
+            )
+            continue
+        for tool in server.get("tools", []):
+            tool_specs.append({"server": server["name"], "tool": tool, "type": "builtin"})
+
+    for server in servers["custom"]:
+        if not server.get("enabled", True):
+            unavailable_servers.append(
+                {
+                    "server": server.get("name"),
+                    "type": "custom",
+                    "status": "disabled",
+                    "reason": "server disabled",
+                }
+            )
+            continue
+        for tool in server.get("tools", []):
+            tool_specs.append({"server": server["name"], "tool": tool, "type": "custom"})
+
+    docker_servers = mcp_bridge.list_servers()
+    for ds in docker_servers:
+        if not _is_server_enabled(ds.get("name", "")):
+            unavailable_servers.append(
+                {
+                    "server": ds.get("name"),
+                    "type": "docker",
+                    "status": "disabled",
+                    "reason": "server disabled",
+                }
+            )
+            continue
+        if ds.get("status") != "running":
+            unavailable_servers.append(
+                {
+                    "server": ds.get("name"),
+                    "type": "docker",
+                    "status": ds.get("status"),
+                    "reason": "docker server not running",
+                }
+            )
+
+    for dt in mcp_bridge.list_all_tools():
+        if not _is_server_enabled(dt.get("server", "")):
+            continue
+        tool_specs.append(
+            {
+                "server": dt["server"],
+                "tool": dt["tool"],
+                "type": "docker",
+                "description": dt.get("description", ""),
+            }
+        )
+
+    return tool_specs, unavailable_servers
+
+
+def _execute_tool_call(call_request: MCPToolCallRequest) -> Dict[str, Any]:
+    try:
+        if not _is_server_enabled(call_request.server):
+            return {
+                "ok": False,
+                "status_code": 400,
+                "error_type": "disabled",
+                "error": f"Tool disabled for server '{call_request.server}'",
+                "result": None,
+            }
+
+        known_tools = TOOLS.get(call_request.server, {}).get("tools")
+        if isinstance(known_tools, list) and known_tools and call_request.tool not in known_tools:
+            return {
+                "ok": False,
+                "status_code": 400,
+                "error_type": "validation",
+                "error": f"Invalid tool {call_request.server}:{call_request.tool}",
+                "result": None,
+            }
+
+        docker_server = mcp_bridge.get_server(call_request.server)
+        if docker_server:
+            if docker_server.status != "running":
+                message = f"Docker MCP server '{call_request.server}' is '{docker_server.status}'"
+                return {
+                    "ok": False,
+                    "status_code": 503,
+                    "error_type": "unavailable",
+                    "error": message,
+                }
+            raw_result = mcp_bridge.call_tool(call_request.server, call_request.tool, call_request.arguments)
+        else:
+            if not is_tool_allowed(call_request.server, call_request.tool):
+                return {
+                    "ok": False,
+                    "status_code": 400,
+                    "error_type": "disabled",
+                    "error": f"{call_request.server}.{call_request.tool} disabled",
+                    "result": None,
+                }
+            raw_result = call_tool(call_request)
+
+        if isinstance(raw_result, dict) and raw_result.get("ok") is False:
+            status_code = int(raw_result.get("status_code", 502))
+            message = str(raw_result.get("error", "Tool call failed"))
+            return {
+                "ok": False,
+                "status_code": status_code,
+                "error_type": str(raw_result.get("error_type", _classify_error(status_code, message))),
+                "error": message,
+                "result": raw_result.get("result"),
+            }
+
+        if isinstance(raw_result, dict) and "error" in raw_result:
+            message = str(raw_result.get("error", "Tool call failed"))
+            status_code = int(raw_result.get("status_code", 502))
+            return {
+                "ok": False,
+                "status_code": status_code,
+                "error_type": _classify_error(status_code, message),
+                "error": message,
+                "result": raw_result.get("result"),
+            }
+
+        result_payload = raw_result.get("result") if isinstance(raw_result, dict) and "result" in raw_result else raw_result
+        return {"ok": True, "status_code": 200, "error_type": None, "error": None, "result": result_payload}
+    except HTTPException as exc:
+        status_code = int(exc.status_code)
+        detail = exc.detail
+        if isinstance(detail, dict):
+            message = str(detail.get("error", detail.get("detail", "Tool call failed")))
+            error_type = str(detail.get("error_type", _classify_error(status_code, message)))
+        else:
+            message = str(detail)
+            error_type = _classify_error(status_code, message)
+        return {
+            "ok": False,
+            "status_code": status_code,
+            "error_type": error_type,
+            "error": message,
+            "result": None,
+        }
+    except Exception as exc:  # pylint: disable=broad-except
+        message = str(exc)
+        return {
+            "ok": False,
+            "status_code": 500,
+            "error_type": _classify_error(500, message),
+            "error": message,
+            "result": None,
+        }
+
 
 def _load_effective_settings(overrides: Optional[Dict[str, Any]] = None) -> RuntimeSettings:
     with _settings_lock:
@@ -104,7 +306,9 @@ def _extract_stream_metrics(chunk: bytes) -> tuple[str, bool]:
 
 def _extract_json_object(raw: str) -> Dict[str, Any]:
     candidate = raw.strip()
+    # Remove markdown code blocks if present
     if candidate.startswith("```"):
+        # Find first { and last }
         first = candidate.find("{")
         last = candidate.rfind("}")
         if first >= 0 and last > first:
@@ -112,10 +316,142 @@ def _extract_json_object(raw: str) -> Dict[str, Any]:
     return json.loads(candidate)
 
 
+def _normalize_action(action: Dict[str, Any], tool_specs: List[Dict[str, Any]], user_query: str = "") -> Dict[str, Any]:
+    """Normalize planner output to a strict tool/server/arguments contract."""
+    normalized = dict(action or {})
+    arguments = normalized.get("arguments")
+    if not isinstance(arguments, dict):
+        arguments = normalized.get("args") if isinstance(normalized.get("args"), dict) else {}
+    normalized["arguments"] = arguments
+
+    # Preserve final answer when explicitly requested.
+    action_type = str(normalized.get("action", "")).strip().lower()
+    if action_type == "final" and normalized.get("response"):
+        return {"action": "final", "response": str(normalized.get("response", ""))}
+
+    tool_val: Any = normalized.get("tool")
+    server_val: Any = normalized.get("server")
+    tool_name: Optional[str]
+    server_name: Optional[str]
+
+    # Case 1: {"tool": {"server": "...", "name": "..."}} (hybrid schema)
+    if isinstance(tool_val, dict):
+        server_val = tool_val.get("server") or server_val
+        tool_val = tool_val.get("name") or tool_val.get("tool")
+
+    tool_name = tool_val.strip().lower() if isinstance(tool_val, str) else None
+    server_name = server_val.strip().lower() if isinstance(server_val, str) else None
+
+    # Case 2: "server:duckduckgo"
+    if tool_name and tool_name.startswith("server:"):
+        inferred_server = tool_name.split(":", 1)[1].strip().lower()
+        if inferred_server:
+            server_name = inferred_server
+        tool_name = None
+
+    if server_name and server_name.startswith("server:"):
+        server_name = server_name.split(":", 1)[1].strip().lower()
+
+    # Case 3: dot notation "duckduckgo.search"
+    if tool_name and "." in tool_name:
+        left, right = tool_name.split(".", 1)
+        if left and right:
+            server_name = left
+            tool_name = right
+
+    # Canonical aliases.
+    aliases = {
+        "web-search": "search_web",
+        "web_search": "search_web",
+        "read": "read_page",
+        "fetch": "read_page",
+    }
+    if tool_name == "duckduckgo":
+        tool_name = "search"
+    elif tool_name in aliases:
+        tool_name = aliases[tool_name]
+
+    # If tool missing, prefer a search-like default from available specs.
+    if not tool_name:
+        preferred = next(
+            (
+                spec
+                for spec in tool_specs
+                if spec["server"].lower() in {"duckduckgo", "browser-search"}
+                and spec["tool"].lower() in {"search", "search_web"}
+            ),
+            None,
+        )
+        if preferred is None and tool_specs:
+            preferred = tool_specs[0]
+        if preferred:
+            server_name = preferred["server"].lower()
+            tool_name = preferred["tool"].lower()
+
+    # If server missing/wrong, align to the discovered server for this tool.
+    if tool_name:
+        matches = [spec for spec in tool_specs if spec["tool"].lower() == tool_name]
+        # If planner picked generic "search", support browser-search fallback.
+        if not matches and tool_name == "search":
+            matches = [spec for spec in tool_specs if spec["tool"].lower() == "search_web"]
+            if matches:
+                tool_name = "search_web"
+        if matches:
+            if not server_name or all(spec["server"].lower() != server_name for spec in matches):
+                server_name = matches[0]["server"].lower()
+        elif server_name:
+            # tool may actually be server name; pick first tool in that server.
+            server_matches = [spec for spec in tool_specs if spec["server"].lower() == tool_name]
+            if server_matches:
+                server_name = server_matches[0]["server"].lower()
+                tool_name = server_matches[0]["tool"].lower()
+
+    if not server_name and tool_specs:
+        server_name = tool_specs[0]["server"].lower()
+
+    if not arguments and tool_name in {"search", "search_web"} and user_query.strip():
+        arguments = {"query": user_query}
+
+    if (not tool_name or not server_name) and tool_specs:
+        preferred = next(
+            (
+                spec
+                for spec in tool_specs
+                if spec["server"].lower() == "duckduckgo" and spec["tool"].lower() in {"search", "fetch_content"}
+            ),
+            None,
+        )
+        if preferred is None:
+            preferred = tool_specs[0]
+        server_name = server_name or preferred["server"].lower()
+        tool_name = tool_name or preferred["tool"].lower()
+
+    return {
+        "action": "tool",
+        "tool": tool_name or "search",
+        "server": server_name or "duckduckgo",
+        "arguments": arguments,
+    }
+
+
 def _llm_call_text(prompt: str, settings_obj: RuntimeSettings) -> str:
     request = GenerateRequest(prompt=prompt, stream=False)
     request_ctx = build_request_context(request, settings_obj)
     return generate_non_stream(request_ctx, settings_obj)
+
+
+@app.on_event("startup")
+async def load_mcp_config() -> None:
+    """Load Docker MCP servers from mcp_config.json if it exists."""
+    import pathlib
+    config_path = pathlib.Path(__file__).resolve().parents[1] / "mcp_config.json"
+    if config_path.exists():
+        try:
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            mcp_bridge.load_config(config)
+            logger.info("Loaded MCP config from %s (%d servers)", config_path, len(config.get("mcpServers", {})))
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.warning("Failed to load MCP config: %s", exc)
 
 
 @app.on_event("startup")
@@ -252,6 +588,19 @@ async def remove_mcp_server(name: str):
     return delete_server(name)
 
 
+class MCPServerToggleRequest(PydanticBaseModel):
+    enabled: bool
+
+
+class ToolToggleRequest(PydanticBaseModel):
+    server: str
+
+
+@app.patch("/mcp/servers/{name}/enabled")
+async def update_mcp_server_enabled(name: str, request: MCPServerToggleRequest):
+    return set_server_enabled(name, request.enabled)
+
+
 @app.get("/mcp/tools")
 async def list_mcp_tools(server: str):
     return list_tools(server)
@@ -277,45 +626,175 @@ async def music_control(request: MusicControlRequest):
     return tool_music_control(request.action, request.value)
 
 
+# â”€â”€ Docker MCP Server Management â”€â”€
+
+class DockerServerRegisterRequest(PydanticBaseModel):
+    name: str
+    command: str = "docker"
+    args: list = []
+    env: dict = {}
+    auto_start: bool = True
+
+
+@app.get("/mcp/docker/servers")
+async def list_docker_servers():
+    servers = []
+    for server in mcp_bridge.list_servers():
+        row = dict(server)
+        row["enabled"] = _is_server_enabled(str(server.get("name", "")))
+        servers.append(row)
+    return {"servers": servers}
+
+
+@app.post("/mcp/docker/servers")
+async def register_docker_server(req: DockerServerRegisterRequest):
+    result = mcp_bridge.register_server(
+        name=req.name, command=req.command, args=req.args,
+        env=req.env, auto_start=req.auto_start,
+    )
+    return result
+
+
+@app.delete("/mcp/docker/servers/{name}")
+async def remove_docker_server(name: str):
+    ok = mcp_bridge.remove_server(name)
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"Docker MCP server '{name}' not found")
+    return {"status": "deleted", "name": name}
+
+
+@app.post("/mcp/docker/servers/{name}/restart")
+async def restart_docker_server(name: str):
+    return mcp_bridge.restart_server(name)
+
+
+@app.get("/mcp/docker/tools")
+async def list_docker_tools():
+    return {"tools": mcp_bridge.list_all_tools()}
+
+
+@app.get("/mcp/catalog")
+async def mcp_catalog():
+    tools, unavailable = _build_tool_specs()
+    return {
+        "tools": tools,
+        "unavailable_servers": unavailable,
+        "counts": {
+            "tools_total": len(tools),
+            "unavailable_servers": len(unavailable),
+        },
+    }
+
+
+@app.post("/mcp/docker/tools/call")
+async def call_docker_tool(request: MCPToolCallRequest):
+    return mcp_bridge.call_tool(request.server, request.tool, request.arguments)
+
+
+@app.post("/mcp/docker/call")
+async def call_docker_tool_alias(request: MCPToolCallRequest):
+    return mcp_bridge.call_tool(request.server, request.tool, request.arguments)
+
+
+@app.post("/tools/toggle")
+async def toggle_tool(request: ToolToggleRequest):
+    server = request.server
+    current = TOOLS.setdefault(server, {"enabled": True, "tools": []})
+    current["enabled"] = not bool(current.get("enabled", True))
+    return {"status": "ok", "server": server, "enabled": bool(current["enabled"])}
+
+
 @app.post("/agent/loop")
 async def agent_loop(request: AgentLoopRequest):
     start = time.perf_counter()
     settings_obj = _load_effective_settings(request.model_dump(exclude_none=True))
-    max_steps = min(max(request.max_steps, 1), 8)
+    max_steps = min(max(request.max_steps, 1), AGENT_MAX_STEPS)
 
-    tool_specs = []
-    servers = list_servers()
-    for server in servers["builtin"]:
-        for tool in server.get("tools", []):
-            tool_specs.append({"server": server["name"], "tool": tool})
-    for server in servers["custom"]:
-        for tool in server.get("tools", []):
-            tool_specs.append({"server": server["name"], "tool": tool})
+    tool_specs, unavailable_servers = _build_tool_specs()
 
     trace = []
     user_task = request.prompt
     final_response = ""
 
     try:
+        if not tool_specs:
+            fallback = (
+                "No MCP tools are currently available. "
+                "Check MCP server health and retry after at least one server is running."
+            )
+            llm_metrics.record_success(time.perf_counter() - start, fallback)
+            return {"status": "ok", "steps": trace, "response": fallback}
+
         for step in range(1, max_steps + 1):
             planner_prompt = (
-                "You are a tool-aware assistant. Decide the next action.\\n"
-                "Return JSON only, no markdown.\\n"
-                "Schema: {\"action\":\"tool\",\"server\":\"...\",\"tool\":\"...\",\"arguments\":{}} "
-                "or {\"action\":\"final\",\"response\":\"...\"}.\\n"
-                f"Available tools: {json.dumps(tool_specs)}\\n"
-                f"User task: {user_task}\\n"
-                f"Trace so far: {json.dumps(trace)}"
+                "You are a STRICT tool selector for an AI agent.\n\n"
+                "Your job is to return EXACTLY ONE JSON object.\n\n"
+                "DO NOT explain anything.\n"
+                "DO NOT add text.\n"
+                "DO NOT change schema.\n\n"
+                "Return ONLY:\n\n"
+                "{\n"
+                '  "tool": "<tool_name>",\n'
+                '  "server": "<server_name>",\n'
+                '  "arguments": { ... }\n'
+                "}\n\n"
+                "RULES:\n\n"
+                "1. tool MUST be a STRING\n"
+                '   - ✅ "search"\n'
+                '   - ❌ { "name": "search" }\n\n'
+                "2. server MUST be a STRING\n"
+                '   - ✅ "duckduckgo"\n'
+                '   - ❌ "server:duckduckgo"\n\n'
+                "3. NEVER use dot notation\n"
+                '   - ❌ "duckduckgo.search"\n\n'
+                "4. NEVER wrap tool inside object\n"
+                '   - ❌ "tool": { "name": "search" }\n\n'
+                "5. arguments MUST be an object\n\n"
+                "6. If unsure, choose a search-capable tool from the available list and pass the user query in arguments.\n\n"
+                "AVAILABLE TOOLS:\n"
+                + "\n".join([f"- {t['server']}: {t['tool']}" for t in tool_specs]) + "\n\n"
+                + (
+                    "UNAVAILABLE SERVERS (DO NOT USE):\n"
+                    + "\n".join([f"- {s['server']} (status: {s['status']})" for s in unavailable_servers])
+                    + "\n\n"
+                    if unavailable_servers
+                    else ""
+                )
+                + "USER QUERY:\n"
+                f"{user_task}\n\n"
+                f"TRACE (History): {json.dumps(trace)}\n"
             )
+            
+            logger.info("========================================")
+            logger.info("ðŸ§  STEP %d: Planning...", step)
+            step_start_time = time.perf_counter()
             raw_action = _llm_call_text(planner_prompt, settings_obj)
-            action = _extract_json_object(raw_action)
+            logger.info("â±ï¸ LLM Planning took %.3fs", time.perf_counter() - step_start_time)
+            
+            logger.info("RAW LLM OUTPUT: %s", raw_action)
+            
+            # Auto-Retry for LLM format failure
+            if "{" not in raw_action or "}" not in raw_action:
+                logger.warning("LLM failed to output JSON, injecting strict constraint and retrying...")
+                retry_prompt = planner_prompt + "\n\nERROR: You did not output JSON. You MUST output ONLY a JSON object."
+                raw_action = _llm_call_text(retry_prompt, settings_obj)
+                logger.info("RETRY RAW LLM OUTPUT: %s", raw_action)
+            
+            try:
+                action = _extract_json_object(raw_action)
+            except Exception as e:
+                logger.warning("Failed to parse LLM response as JSON: %s", raw_action)
+                trace.append({"step": step, "error": f"Invalid JSON response: {str(e)}", "raw": raw_action})
+                continue
 
-            if action.get("action") == "final":
-                final_response = str(action.get("response", "")).strip()
-                break
+            # Normalize to strict tool/server/arguments contract.
+            action = _normalize_action(action, tool_specs, user_query=user_task)
+            action_type = action.get("action", "tool")
 
-            if action.get("action") != "tool":
-                final_response = raw_action.strip()
+            if action_type == "final":
+                final_response = str(action.get("response", ""))
+                if not final_response:
+                    final_response = raw_action.strip()
                 break
 
             call_request = MCPToolCallRequest(
@@ -323,15 +802,33 @@ async def agent_loop(request: AgentLoopRequest):
                 tool=str(action.get("tool", "")),
                 arguments=action.get("arguments", {}) or {},
             )
-            tool_result = call_tool(call_request)
+            
+            logger.info("ðŸ› ï¸ EXEC: %s:%s %s", call_request.server, call_request.tool, call_request.arguments)
+            # Execution with typed error capture
+            tool_start = time.perf_counter()
+            tool_result = _execute_tool_call(call_request)
+            if not tool_result.get("ok", False):
+                logger.warning(
+                    "TOOL ERROR (%s): %s",
+                    tool_result.get("error_type", "unknown"),
+                    tool_result.get("error", ""),
+                )
+            else:
+                logger.info("TOOL SUCCESS")
+
+            tool_latency = time.perf_counter() - tool_start
             trace.append(
                 {
                     "step": step,
                     "tool": {"server": call_request.server, "name": call_request.tool},
                     "arguments": call_request.arguments,
                     "result": tool_result,
+                    "latency_ms": int(tool_latency * 1000),
                 }
             )
+            if tool_result.get("ok") and tool_result.get("result") is not None:
+                break
+            logger.info("========================================")
 
         if not final_response:
             summary_prompt = (
@@ -375,3 +872,5 @@ if __name__ == "__main__":
 
     settings = get_settings()
     run(app, host=settings.llm_host, port=settings.llm_port, log_level=settings.log_level.lower())
+
+

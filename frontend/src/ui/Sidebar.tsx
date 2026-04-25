@@ -8,18 +8,26 @@ const MODES: { key: AppMode; icon: string; label: string }[] = [
 ];
 
 import { useSettingsStore } from '../core/state/settingsStore';
+import { useMCPStore } from '../core/state/mcpStore';
 
 const NAV_ITEMS = [
   { icon: 'memory', label: 'Memory' },
+  { icon: 'hub', label: 'MCP' },
   { icon: 'settings', label: 'Settings' }
 ];
 
-export const Sidebar: React.FC = () => {
-  const { mode, setMode, showDebug, setShowDebug } = useAgentStore();
+interface SidebarProps {
+  onModeChange: (mode: AppMode) => void;
+}
+
+export const Sidebar: React.FC<SidebarProps> = ({ onModeChange }) => {
+  const { mode, showDebug, setShowDebug } = useAgentStore();
 
   const handleNavClick = (label: string) => {
     if (label === 'Settings') {
       useSettingsStore.getState().setSettingsOpen(true);
+    } else if (label === 'MCP') {
+      useMCPStore.getState().setPanelOpen(true);
     }
   };
 
@@ -36,7 +44,7 @@ export const Sidebar: React.FC = () => {
         {MODES.map((m) => (
           <button
             key={m.key}
-            onClick={() => setMode(m.key)}
+            onClick={() => onModeChange(m.key)}
             className={`flex flex-col items-center gap-1 p-2 rounded-xl transition-all duration-200 group ${
               mode === m.key
                 ? 'bg-[var(--color-primary)]/20 text-[var(--color-primary)] scale-105'

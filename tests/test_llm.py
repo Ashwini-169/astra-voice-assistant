@@ -1,8 +1,10 @@
 import time
 
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from services import llm_service
+from services.llm_models import MCPToolCallRequest
 
 
 class _DummyResponse:
@@ -90,3 +92,144 @@ def test_metrics_endpoint(monkeypatch):
     assert "latency_ms" in body
     assert "throughput" in body
     assert "errors" in body
+
+
+def test_mcp_catalog_filters_unavailable_servers(monkeypatch):
+    monkeypatch.setattr(
+        llm_service,
+        "list_servers",
+        lambda: {
+            "builtin": [{"name": "file-search", "tools": ["search_files"]}],
+            "custom": [{"name": "private-docs", "enabled": False, "tools": ["write_doc"]}],
+        },
+    )
+    monkeypatch.setattr(
+        llm_service.mcp_bridge,
+        "list_servers",
+        lambda: [
+            {"name": "duckduckgo", "status": "running"},
+            {"name": "youtube_transcript", "status": "error"},
+        ],
+    )
+    monkeypatch.setattr(
+        llm_service.mcp_bridge,
+        "list_all_tools",
+        lambda: [{"server": "duckduckgo", "tool": "search", "description": "web search"}],
+    )
+
+    with TestClient(llm_service.app) as client:
+        response = client.get("/mcp/catalog")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert any(t["server"] == "duckduckgo" and t["tool"] == "search" for t in body["tools"])
+    assert any(s["server"] == "youtube_transcript" for s in body["unavailable_servers"])
+    assert any(s["server"] == "private-docs" for s in body["unavailable_servers"])
+
+
+def test_execute_tool_call_returns_typed_http_error(monkeypatch):
+    def _boom(_request):
+        raise HTTPException(
+            status_code=404,
+            detail={"error": "MCP server not found", "error_type": "not_found"},
+        )
+
+    monkeypatch.setattr(llm_service, "call_tool", _boom)
+    monkeypatch.setattr(llm_service.mcp_bridge, "get_server", lambda _name: None)
+
+    result = llm_service._execute_tool_call(  # pylint: disable=protected-access
+        MCPToolCallRequest(server="missing", tool="search_files", arguments={})
+    )
+    assert result["ok"] is False
+    assert result["status_code"] == 404
+    assert result["error_type"] == "not_found"
+
+
+def test_agent_loop_records_typed_tool_error(monkeypatch):
+    outputs = iter(
+        [
+            '{"action":"tool","server":"file-search","tool":"search_files","arguments":{"query":"x","limit":1}}',
+            '{"action":"final","response":"done"}',
+        ]
+    )
+    monkeypatch.setattr(llm_service, "_llm_call_text", lambda _prompt, _settings: next(outputs))
+    monkeypatch.setattr(
+        llm_service,
+        "list_servers",
+        lambda: {"builtin": [{"name": "file-search", "tools": ["search_files"]}], "custom": []},
+    )
+    monkeypatch.setattr(llm_service.mcp_bridge, "list_servers", lambda: [])
+    monkeypatch.setattr(llm_service.mcp_bridge, "list_all_tools", lambda: [])
+    monkeypatch.setattr(llm_service.mcp_bridge, "get_server", lambda _name: None)
+
+    def _fail_tool(_request):
+        raise HTTPException(status_code=504, detail={"error": "Custom MCP timeout", "error_type": "timeout"})
+
+    monkeypatch.setattr(llm_service, "call_tool", _fail_tool)
+
+    with TestClient(llm_service.app) as client:
+        response = client.post("/agent/loop", json={"prompt": "test mcp loop", "max_steps": 2})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ok"
+    assert body["response"] == "done"
+    first_step = body["steps"][0]
+    assert first_step["result"]["ok"] is False
+    assert first_step["result"]["error_type"] == "timeout"
+    assert first_step["result"]["status_code"] == 504
+    assert isinstance(first_step["latency_ms"], int)
+
+
+def test_normalize_action_hybrid_tool_object_falls_back_to_search():
+    tool_specs = [{"server": "duckduckgo", "tool": "search"}, {"server": "browser-search", "tool": "read_page"}]
+    action = {"tool": {"server": "duckduckgo", "name": "server:duckduckgo"}}
+
+    normalized = llm_service._normalize_action(  # pylint: disable=protected-access
+        action, tool_specs, user_query="latest ai voice assistant"
+    )
+
+    assert normalized["tool"] == "search"
+    assert normalized["server"] == "duckduckgo"
+    assert normalized["arguments"] == {"query": "latest ai voice assistant"}
+
+
+def test_normalize_action_dot_notation():
+    tool_specs = [{"server": "duckduckgo", "tool": "search"}]
+    action = {"tool": "duckduckgo.search", "arguments": {"query": "weather"}}
+
+    normalized = llm_service._normalize_action(action, tool_specs)  # pylint: disable=protected-access
+
+    assert normalized["tool"] == "search"
+    assert normalized["server"] == "duckduckgo"
+    assert normalized["arguments"] == {"query": "weather"}
+
+
+def test_disabled_builtin_tool_returns_error():
+    with TestClient(llm_service.app) as client:
+        toggle = client.patch("/mcp/servers/browser-search/enabled", json={"enabled": False})
+        assert toggle.status_code == 200
+
+        response = client.post(
+            "/mcp/tools/call",
+            json={"server": "browser-search", "tool": "search_web", "arguments": {"query": "x"}},
+        )
+        assert response.status_code == 400
+        assert "disabled" in str(response.json().get("detail", "")).lower()
+
+        reenable = client.patch("/mcp/servers/browser-search/enabled", json={"enabled": True})
+        assert reenable.status_code == 200
+
+
+def test_toggle_builtin_server_reflected_in_list():
+    with TestClient(llm_service.app) as client:
+        disable = client.patch("/mcp/servers/browser-search/enabled", json={"enabled": False})
+        assert disable.status_code == 200
+
+        listed = client.get("/mcp/servers")
+        assert listed.status_code == 200
+        browser = next(s for s in listed.json()["builtin"] if s["name"] == "browser-search")
+        assert browser["enabled"] is False
+
+        enable = client.patch("/mcp/servers/browser-search/enabled", json={"enabled": True})
+        assert enable.status_code == 200

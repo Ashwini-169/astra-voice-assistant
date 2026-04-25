@@ -9,6 +9,8 @@ from services import tts_service
 def _fake_post(url, json, timeout):  # pylint: disable=redefined-outer-name
     class _DummyResponse:
         status_code = 200
+        content = b""
+        headers = {"content-type": "audio/wav"}
 
         def raise_for_status(self):
             return None
@@ -21,6 +23,7 @@ def _set_runtime_defaults(client: TestClient, backend: str = "edge") -> None:
         "/settings",
         json={
             "backend": backend,
+            "edge_offline_fallback_enabled": False,
             "edge_base_rate_pct": 8,
             "chunk_initial_words": 5,
             "chunk_steady_words": 14,
@@ -48,6 +51,62 @@ def test_speak_piper(monkeypatch):
     assert data["backend"] == "piper"
 
 
+def test_speak_piper_uses_female_voice_setting(monkeypatch):
+    """Piper requests include the configured female voice name."""
+    seen_payloads = []
+
+    def fake_post(url, json, timeout):  # pylint: disable=redefined-outer-name
+        seen_payloads.append(json)
+
+        class _DummyResponse:
+            status_code = 200
+            content = b""
+            headers = {"content-type": "audio/wav"}
+
+            def raise_for_status(self):
+                return None
+
+        return _DummyResponse()
+
+    monkeypatch.setattr(tts_service._http_session, "post", fake_post)
+
+    with TestClient(tts_service.app) as client:
+        _set_runtime_defaults(client, backend="piper")
+        client.post("/settings", json={"piper_voice": "en_US-lessac-medium"})
+        response = client.post("/speak", json={"text": "Hello world"})
+
+    assert response.status_code == 200
+    assert seen_payloads[0]["voice"] == "en_US-lessac-medium"
+
+
+def test_speak_piper_retries_legacy_text_only_payload(monkeypatch):
+    """Older Piper servers that reject voice fields still work."""
+    seen_payloads = []
+
+    def fake_post(url, json, timeout):  # pylint: disable=redefined-outer-name
+        seen_payloads.append(json)
+
+        class _DummyResponse:
+            status_code = 422 if len(seen_payloads) == 1 else 200
+            content = b""
+            headers = {"content-type": "audio/wav"}
+
+            def raise_for_status(self):
+                return None
+
+        return _DummyResponse()
+
+    monkeypatch.setattr(tts_service._http_session, "post", fake_post)
+
+    with TestClient(tts_service.app) as client:
+        _set_runtime_defaults(client, backend="piper")
+        response = client.post("/speak", json={"text": "Hello world"})
+
+    assert response.status_code == 200
+    assert "voice" in seen_payloads[0]
+    assert seen_payloads[1] == {"text": "Hello world"}
+
+
 def test_speak_edge(monkeypatch):
     """Test /speak with edge backend (mocked _speak_edge)."""
 
@@ -64,6 +123,82 @@ def test_speak_edge(monkeypatch):
     data = response.json()
     assert data["accepted"] is True
     assert data["backend"] == "edge"
+
+
+def test_speak_edge_offline_routes_to_piper(monkeypatch):
+    """When offline is detected, edge requests should route directly to piper."""
+
+    async def fake_status(_runtime):
+        return False
+
+    monkeypatch.setattr(tts_service._network_state, "get_status", fake_status)
+    monkeypatch.setattr(tts_service._http_session, "post", _fake_post)
+
+    with TestClient(tts_service.app) as client:
+        _set_runtime_defaults(client, backend="edge")
+        client.post("/settings", json={"edge_offline_fallback_enabled": True})
+        response = client.post("/speak", json={"text": "Hello offline"})
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["accepted"] is True
+    assert data["backend"] == "piper"
+    assert data["backend_status"] == 200
+
+
+def test_speak_edge_error_falls_back_to_piper(monkeypatch):
+    """When edge fails while online, service falls back to piper."""
+
+    async def fake_status(_runtime):
+        return True
+
+    async def fake_edge(_payload):
+        raise RuntimeError("edge unavailable")
+
+    monkeypatch.setattr(tts_service._network_state, "get_status", fake_status)
+    monkeypatch.setattr(tts_service, "_speak_edge", fake_edge)
+    monkeypatch.setattr(tts_service._http_session, "post", _fake_post)
+
+    with TestClient(tts_service.app) as client:
+        _set_runtime_defaults(client, backend="edge")
+        client.post("/settings", json={"edge_offline_fallback_enabled": True})
+        response = client.post("/speak", json={"text": "Hello fallback"})
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["accepted"] is True
+    assert data["backend"] == "piper"
+    assert data["backend_status"] == 200
+
+
+def test_synthesize_edge_offline_falls_back_to_piper(monkeypatch):
+    """Direct /synthesize should also fallback when edge is offline."""
+
+    async def fake_status(_runtime):
+        return False
+
+    def fake_post(url, json, timeout):  # pylint: disable=redefined-outer-name
+        class _DummyResponse:
+            status_code = 200
+            content = b"fake-wav"
+            headers = {"content-type": "audio/wav"}
+
+            def raise_for_status(self):
+                return None
+
+        return _DummyResponse()
+
+    monkeypatch.setattr(tts_service._network_state, "get_status", fake_status)
+    monkeypatch.setattr(tts_service._http_session, "post", fake_post)
+
+    with TestClient(tts_service.app) as client:
+        _set_runtime_defaults(client, backend="edge")
+        client.post("/settings", json={"edge_offline_fallback_enabled": True})
+        response = client.post("/synthesize", json={"text": "Hello synth offline"})
+
+    assert response.status_code == 200
+    assert response.content == b"fake-wav"
+    assert response.headers["content-type"].startswith("audio/wav")
 
 
 def test_stop_clears_engine_and_increments_generation(monkeypatch):
@@ -170,6 +305,7 @@ def test_runtime_settings_and_streaming_config_endpoints():
             json={
                 "backend": "piper",
                 "piper_api_url": "http://127.0.0.1:60000",
+                "piper_voice": "en_US-lessac-medium",
                 "fish_speech_api_url": "http://127.0.0.1:9000",
                 "edge_base_rate_pct": 10,
                 "chunk_initial_words": 6,
@@ -184,6 +320,7 @@ def test_runtime_settings_and_streaming_config_endpoints():
         body = settings_data.json()
         assert body["backend"] == "piper"
         assert body["piper_api_url"] == "http://127.0.0.1:60000"
+        assert body["piper_voice"] == "en_US-lessac-medium"
         assert body["chunk_initial_words"] == 6
         assert body["chunk_steady_words"] == 16
 

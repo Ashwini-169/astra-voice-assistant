@@ -13,28 +13,43 @@ logger = logging.getLogger(__name__)
 _workspace_root = Path(__file__).resolve().parents[1]
 _custom_mcp_servers: Dict[str, MCPServerConfig] = {}
 _music_state: Dict[str, Any] = {"status": "stopped", "volume": 50, "track": None}
+_builtin_registry: Dict[str, Dict[str, Any]] = {
+    "browser-search": {
+        "enabled": True,
+        "tools": ["search_web", "read_page"],
+        "label": "browser-search",
+        "type": "builtin",
+        "description": "Simple web search over DuckDuckGo HTML endpoint and page reading.",
+    },
+    "file-search": {
+        "enabled": True,
+        "tools": ["search_files"],
+        "label": "file-search",
+        "type": "builtin",
+        "description": "Search files in workspace for matching text.",
+    },
+    "music-control": {
+        "enabled": True,
+        "tools": ["play", "pause", "resume", "stop", "next", "previous", "set_volume"],
+        "label": "music-control",
+        "type": "builtin",
+        "description": "Basic play/pause/stop/volume control state endpoint.",
+    },
+}
 
 
 def builtin_servers() -> List[Dict[str, Any]]:
     return [
         {
-            "name": "browser-search",
+            "name": name,
             "kind": "builtin",
-            "description": "Simple web search over DuckDuckGo HTML endpoint.",
-            "tools": ["search_web"],
-        },
-        {
-            "name": "file-search",
-            "kind": "builtin",
-            "description": "Search files in workspace for matching text.",
-            "tools": ["search_files"],
-        },
-        {
-            "name": "music-control",
-            "kind": "builtin",
-            "description": "Basic play/pause/stop/volume control state endpoint.",
-            "tools": ["play", "pause", "resume", "stop", "next", "previous", "set_volume"],
-        },
+            "type": cfg["type"],
+            "label": cfg["label"],
+            "enabled": bool(cfg["enabled"]),
+            "description": cfg["description"],
+            "tools": list(cfg["tools"]),
+        }
+        for name, cfg in _builtin_registry.items()
     ]
 
 
@@ -55,17 +70,39 @@ def delete_server(name: str) -> dict:
     return {"status": "deleted", "name": name}
 
 
+def set_server_enabled(name: str, enabled: bool) -> dict:
+    if name in _builtin_registry:
+        _builtin_registry[name]["enabled"] = bool(enabled)
+        return {"status": "updated", "server": name, "enabled": bool(enabled), "type": "builtin"}
+
+    config = _custom_mcp_servers.get(name)
+    if config is None:
+        raise HTTPException(status_code=404, detail="MCP server not found")
+    config.enabled = bool(enabled)
+    return {"status": "updated", "server": name, "enabled": bool(enabled), "type": "custom"}
+
+
+def is_tool_allowed(server: str, tool: str) -> bool:
+    if server in _builtin_registry:
+        cfg = _builtin_registry[server]
+        return bool(cfg["enabled"]) and tool in cfg["tools"]
+
+    config = _custom_mcp_servers.get(server)
+    if config is not None:
+        return bool(config.enabled) and tool in config.tools
+
+    # Unknown here may still be docker-managed and validated by the docker bridge.
+    return True
+
+
 def list_tools(server: str) -> dict:
-    if server == "browser-search":
-        return {"server": server, "tools": ["search_web"]}
-    if server == "file-search":
-        return {"server": server, "tools": ["search_files"]}
-    if server == "music-control":
-        return {"server": server, "tools": ["play", "pause", "resume", "stop", "next", "previous", "set_volume"]}
+    if server in _builtin_registry:
+        cfg = _builtin_registry[server]
+        return {"server": server, "enabled": bool(cfg["enabled"]), "tools": list(cfg["tools"])}
     config = _custom_mcp_servers.get(server)
     if config is None:
         raise HTTPException(status_code=404, detail="MCP server not found")
-    return {"server": server, "tools": config.tools}
+    return {"server": server, "enabled": bool(config.enabled), "tools": config.tools}
 
 
 def tool_browser_search(query: str, limit: int = 5) -> Dict[str, Any]:
@@ -91,6 +128,29 @@ def tool_browser_search(query: str, limit: int = 5) -> Dict[str, Any]:
         if title:
             results.append({"title": title, "url": link})
     return {"query": query, "results": results}
+
+
+def tool_read_page(url: str) -> Dict[str, Any]:
+    try:
+        response = _http_session.get(url, timeout=15)
+        response.raise_for_status()
+        html = response.text
+
+        # Basic text extraction (strip script/style tags)
+        import re
+
+        # Remove scripts and styles
+        clean_html = re.sub(r"<(script|style)[^>]*>.*?</\1>", "", html, flags=re.DOTALL | re.IGNORECASE)
+        # Remove all other tags
+        text = re.sub(r"<[^>]+>", " ", clean_html)
+        # Normalize whitespace
+        text = re.sub(r"\s+", " ", text).strip()
+
+        # Limit to first 10k chars for the LLM
+        return {"url": url, "content": text[:10000]}
+    except Exception as exc:
+        logger.error("Failed to read page %s: %s", url, exc)
+        return {"url": url, "error": str(exc)}
 
 
 def tool_file_search(query: str, limit: int = 20, base_path: str = ".") -> Dict[str, Any]:
@@ -143,11 +203,16 @@ def tool_music_control(action: str, value: Optional[int] = None) -> Dict[str, An
 
 
 def call_tool(request: MCPToolCallRequest) -> dict:
+    if not is_tool_allowed(request.server, request.tool):
+        raise HTTPException(status_code=400, detail=f"{request.server}.{request.tool} disabled")
+
     if request.server == "browser-search" and request.tool == "search_web":
         return tool_browser_search(
             query=str(request.arguments.get("query", "")),
             limit=int(request.arguments.get("limit", 5)),
         )
+    if request.server == "browser-search" and request.tool == "read_page":
+        return tool_read_page(url=str(request.arguments.get("url", "")))
     if request.server == "file-search" and request.tool == "search_files":
         return tool_file_search(
             query=str(request.arguments.get("query", "")),
@@ -175,5 +240,17 @@ def call_tool(request: MCPToolCallRequest) -> dict:
         return {"server": request.server, "tool": request.tool, "result": response.json()}
     except Exception as exc:  # pylint: disable=broad-except
         logger.error("Custom MCP tool call failed: %s", exc)
-        raise HTTPException(status_code=502, detail="Custom MCP tool call failed") from exc
-
+        message = str(exc)
+        lower_msg = message.lower()
+        error_type = "server"
+        status_code = 502
+        if "timed out" in lower_msg or "timeout" in lower_msg:
+            error_type = "timeout"
+            status_code = 504
+        elif "refused" in lower_msg or "connection" in lower_msg or "unreachable" in lower_msg:
+            error_type = "connection"
+            status_code = 502
+        raise HTTPException(
+            status_code=status_code,
+            detail={"error": "Custom MCP tool call failed", "error_type": error_type, "message": message},
+        ) from exc

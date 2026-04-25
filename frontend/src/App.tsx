@@ -4,40 +4,29 @@ import { Avatar } from './ui/Avatar';
 import { Waveform } from './ui/Waveform';
 import { useVoicePipeline } from './hooks/useVoicePipeline';
 import { useAgentStore } from './core/state/agentStore';
+import type { AppMode } from './core/state/agentStore';
 import { audioPlayer } from './core/audio/player';
 import { DebugPanel } from './ui/DebugPanel';
 import { TranscriptPanel } from './ui/TranscriptPanel';
 import { useMetrics } from './hooks/useMetrics';
 import { ParticleBackground } from './ui/ParticleBackground';
 import { SettingsPanel } from './ui/SettingsPanel';
-
-const STATE_LABELS: Record<string, string> = {
-  idle: 'Ready',
-  listening: '🎙️ Listening',
-  thinking: '🧠 Processing',
-  speaking: '🔊 Speaking',
-  interrupting: '⏹️ Interrupted',
-  error: '❌ Error',
-};
-
-const STATE_COLORS: Record<string, string> = {
-  idle: 'bg-zinc-900/60 border-zinc-700/30 text-zinc-400',
-  listening: 'bg-emerald-900/30 border-emerald-500/30 text-emerald-300 animate-pulse',
-  thinking: 'bg-amber-900/30 border-amber-500/30 text-amber-300 animate-pulse',
-  speaking: 'bg-indigo-900/30 border-indigo-500/30 text-indigo-300',
-  interrupting: 'bg-red-900/30 border-red-500/30 text-red-300',
-  error: 'bg-red-900/40 border-red-500/40 text-red-300',
-};
+import { MCPPanel } from './ui/MCPPanel';
 
 function App() {
-  const { startPipeline, stopPipeline } = useVoicePipeline();
-  const { state, duplexEnabled, setDuplexEnabled, mode, volume, setVolume, chatHistory, response, partialTranscript } = useAgentStore();
+  const { startPipeline, stopPipeline, handleStream } = useVoicePipeline();
+  const {
+    state, duplexEnabled, setDuplexEnabled, mode, volume, setVolume,
+    chatHistory, response, partialTranscript, setMode, setTranscript,
+    setPartialTranscript, setResponse, setMicRms, setPlaybackRms,
+    setIsAudioPlaying,
+  } = useAgentStore();
   const [chatInput, setChatInput] = useState('');
   const prevVolumeRef = useRef(volume);
 
   // Determine if transcript reflects content worth showing
   const hasTranscript = chatHistory.length > 0 || response.length > 0 || partialTranscript.length > 0;
-  const layoutPadding = hasTranscript ? 'md:pr-96' : '';
+  const layoutPadding = mode === 'voice' && hasTranscript ? 'md:pr-96' : '';
 
   // Start metrics polling
   useMetrics();
@@ -67,10 +56,30 @@ function App() {
 
   const handleChatSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!chatInput.trim()) return;
+    const text = chatInput.trim();
+    if (text.length < 3) return;
+
     const { addMessage } = useAgentStore.getState();
-    addMessage({ role: 'user', content: chatInput.trim() });
+    const modeSnapshot = mode;
+    console.log('[Chat Submit]', { mode: modeSnapshot, source: 'typed', isFinal: true, text });
+    addMessage({ role: 'user', content: text });
     setChatInput('');
+    handleStream(text, modeSnapshot, 'typed', true);
+  };
+
+  const switchMode = async (newMode: AppMode) => {
+    if (newMode === mode) return;
+
+    await stopPipeline();
+    audioPlayer.stop();
+    setTranscript('');
+    setPartialTranscript('');
+    setResponse('');
+    setMicRms(0);
+    setPlaybackRms(0);
+    setIsAudioPlaying(false);
+    setDuplexEnabled(newMode === 'voice');
+    setMode(newMode);
   };
 
   const toggleDuplex = () => {
@@ -91,24 +100,48 @@ function App() {
         <ParticleBackground />
       </div>
 
-      <Sidebar />
+      <Sidebar onModeChange={switchMode} />
 
-      <main className={`relative h-screen w-full flex flex-col items-center p-6 bg-[var(--color-surface)] overflow-hidden transition-all duration-500 ${layoutPadding}`}>
+      <main className={`relative h-screen w-full flex flex-col p-6 bg-[var(--color-surface)] overflow-hidden transition-all duration-500 pl-4 md:pl-24`}>
         {/* Floating background gradient for the character area */}
-        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] bg-[var(--color-primary)]/5 blur-[150px] rounded-full pointer-events-none"></div>
+        {mode === 'voice' && (
+          <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] bg-[var(--color-primary)]/5 blur-[150px] rounded-full pointer-events-none"></div>
+        )}
 
-        <Avatar />
-        <DebugPanel />
-        <Waveform />
+        {mode === 'voice' ? (
+          <div className={`w-full flex-1 flex flex-col items-center justify-center transition-all ${layoutPadding}`}>
+            <Avatar />
+            <DebugPanel />
+            <Waveform />
+          </div>
+        ) : (
+          <div className="flex-1 w-full flex flex-col relative h-full items-center">
+            {/* Small Avatar on Top Right - Keeps motion running! */}
+            <div className="absolute top-0 right-0 transform scale-[0.4] origin-top-right z-10 pointer-events-none mix-blend-screen opacity-90">
+              <Avatar />
+            </div>
+            {/* Embedded ChatGPT style view */}
+            <TranscriptPanel inline={true} />
+            <DebugPanel />
+          </div>
+        )}
 
 
 
-        {/* 🚀 PRO DOCK: Three-Zone Professional Layout */}
-        <div className={`fixed bottom-4 left-1/2 -translate-x-1/2 w-[95%] max-w-2xl px-2 z-50 transition-all duration-500 ${layoutPadding}`}>
-          <div className="bg-zinc-950/60 backdrop-blur-2xl rounded-full px-4 py-3 flex items-center justify-between w-full shadow-[0_25px_60px_-15px_rgba(0,0,0,0.8)] border border-white/10 ring-1 ring-white/5">
+        {/* 🚀 PRO DOCK: Dynamic Layout dependent on AppMode */}
+        <div className={
+          mode === 'voice' 
+            ? `fixed bottom-4 left-1/2 -translate-x-1/2 w-[95%] max-w-2xl px-2 z-50 transition-all duration-500 ${layoutPadding}`
+            : `fixed top-48 right-10 w-16 z-50 transition-all duration-500 origin-top`
+        }>
+          <div className={`bg-zinc-950/60 backdrop-blur-2xl border border-white/10 ring-1 ring-white/5 flex shadow-[0_25px_60px_-15px_rgba(0,0,0,0.8)] ${
+            mode === 'voice' 
+              ? "rounded-full px-4 py-3 flex-row items-center justify-between w-full"
+              : "rounded-[2rem] py-6 px-2 flex-col items-center gap-6"
+          }`}>
             
-            {/* ZONE 1: Audio Controls (Left) */}
-            <div className="flex items-center gap-3 flex-1 min-w-0">
+            {/* ZONE 1: Audio Controls */}
+            <div className={`flex items-center gap-3 flex-1 min-w-0 ${mode !== 'voice' ? 'flex-col' : ''}`}>
               <button 
                 onClick={toggleMute}
                 className={`flex items-center justify-center w-10 h-10 rounded-full transition-all ${
@@ -121,17 +154,19 @@ function App() {
                 </span>
               </button>
               
-              <div className="hidden sm:flex flex-1 items-center max-w-[140px]">
-                <input 
-                  type="range" 
-                  min="0" 
-                  max="100" 
-                  value={volume} 
-                  onChange={(e) => setVolume(Number(e.target.value))}
-                  className="w-full h-1.5 bg-white/10 rounded-full accent-[var(--color-primary)] cursor-pointer appearance-none transition-all hover:h-2"
-                />
+              <div className={`hidden sm:flex flex-1 items-center max-w-[140px] ${mode !== 'voice' ? 'hidden sm:hidden hidden-absolute' : ''}`}>
+                {mode === 'voice' && (
+                  <input 
+                    type="range" 
+                    min="0" 
+                    max="100" 
+                    value={volume} 
+                    onChange={(e) => setVolume(Number(e.target.value))}
+                    className="w-full h-1.5 bg-white/10 rounded-full accent-[var(--color-primary)] cursor-pointer appearance-none transition-all hover:h-2"
+                  />
+                )}
               </div>
-              <span className="hidden sm:inline text-[10px] text-zinc-500 font-mono w-6 text-right">{volume}</span>
+              {mode === 'voice' && <span className="hidden sm:inline text-[10px] text-zinc-500 font-mono w-6 text-right">{volume}</span>}
             </div>
             
             {/* ZONE 2: Primary Interaction (Center) */}
@@ -170,8 +205,8 @@ function App() {
               </button>
             </div>
 
-            {/* ZONE 3: System Controls (Right) */}
-            <div className="flex items-center gap-2 flex-1 justify-end">
+            {/* ZONE 3: System Controls */}
+            <div className={`flex items-center gap-2 flex-1 ${mode === 'voice' ? 'justify-end' : 'flex-col'}`}>
               {/* Stop AI Action */}
               <button 
                 className="w-10 h-10 flex items-center justify-center text-zinc-400 hover:text-red-400 hover:bg-red-500/5 rounded-full transition-colors disabled:opacity-0" 
@@ -204,7 +239,7 @@ function App() {
 
         {/* Chat Input (Chat/Agent mode) */}
         {(mode === 'chat' || mode === 'agent') && (
-          <form onSubmit={handleChatSubmit} className={`fixed bottom-24 left-1/2 -translate-x-1/2 w-full max-w-lg px-4 z-50 transition-all duration-500 ${layoutPadding}`}>
+          <form onSubmit={handleChatSubmit} className="fixed bottom-24 left-1/2 -translate-x-1/2 w-full max-w-3xl px-4 z-50 transition-all duration-500 pl-4 md:pl-24">
             <div className="flex items-center gap-3 bg-zinc-900/80 backdrop-blur-md rounded-full px-5 py-3 border border-white/10">
               <input
                 type="text"
@@ -221,11 +256,12 @@ function App() {
         )}
       </main>
 
-      {/* Transcript Panel (Right Side) */}
-      <TranscriptPanel />
+      {/* Transcript Panel (Right Side - Voice mode only) */}
+      {mode === 'voice' && <TranscriptPanel />}
 
       {/* Settings Overlay */}
       <SettingsPanel />
+      <MCPPanel />
     </div>
   );
 }

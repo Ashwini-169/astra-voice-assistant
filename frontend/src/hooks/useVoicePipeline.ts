@@ -110,6 +110,19 @@ export const useVoicePipeline = () => {
     }
   }, [isBrowserASRSupported]);
 
+  const dispatchTranscript = useCallback((text: string, source: string, isFinal: boolean) => {
+    const trimmedText = text.trim();
+    if (trimmedText.length < 3) {
+      console.log('[Voice Dispatch] ignored short text', { source, isFinal, text: trimmedText });
+      return;
+    }
+
+    const modeSnapshot = useAgentStore.getState().mode;
+    console.log('[Voice Dispatch]', { mode: modeSnapshot, source, isFinal, text: trimmedText });
+    addMessage({ role: 'user', content: trimmedText });
+    handleStream(trimmedText, modeSnapshot, source, isFinal);
+  }, [addMessage, handleStream]);
+
   // ═══════════════════════════════════════════════════════
   // AUTO-RELISTEN (duplex loop)
   // ═══════════════════════════════════════════════════════
@@ -173,8 +186,7 @@ export const useVoicePipeline = () => {
       if (text.trim().length >= 3) {
         console.log('[FSM] Whisper:', text);
         setTranscript(text);
-        addMessage({ role: 'user', content: text });
-        handleStream(text); // → thinking → speaking (managed by useLLMStream)
+        dispatchTranscript(text, 'whisper', true);
       } else {
         // DEAD END: no valid speech → idle, let auto-relisten handle re-entry
         console.warn(`[FSM] Whisper empty ("${text}") → dead end`);
@@ -185,7 +197,7 @@ export const useVoicePipeline = () => {
       transition('error', 'whisper-error');
       setTimeout(() => transition('idle', 'error-recovery'), 1500);
     }
-  }, [getState, transition, setTranscript, handleStream, addMessage]);
+  }, [getState, transition, setTranscript, dispatchTranscript]);
 
   // ═══════════════════════════════════════════════════════
   // BARGE-IN (interrupt during SPEAKING)
@@ -333,13 +345,17 @@ export const useVoicePipeline = () => {
               setTranscript(text);
               setPartialTranscript('');
               asrRef.current?.stop();
-              addMessage({ role: 'user', content: text });
-              handleStream(text); // → thinking → speaking
+              dispatchTranscript(text, 'browser-asr-final', true);
 
             } else if (!isFinal && text.trim()) {
               // Interim transcript — feed UI + early LLM debounce
               setPartialTranscript(text);
               lastPartialRef.current = text;
+
+              if (useAgentStore.getState().mode === 'agent') {
+                console.log('[FSM] Agent mode: waiting for final ASR transcript');
+                return;
+              }
 
               const wordCount = text.trim().split(/\s+/).length;
               if (wordCount >= PARTIAL_WORD_THRESHOLD) {
@@ -348,14 +364,14 @@ export const useVoicePipeline = () => {
                   partialTimerRef.current = null;
                   // Re-check state at debounce fire time
                   if (getState() !== 'listening' || !lastPartialRef.current.trim()) return;
+                  if (useAgentStore.getState().mode === 'agent') return;
 
                   console.log(`[FSM] ⚡ Early LLM (${wordCount} words, ${PARTIAL_DEBOUNCE_MS}ms)`);
                   const partialText = lastPartialRef.current;
                   setTranscript(partialText);
                   setPartialTranscript('');
                   asrRef.current?.stop();
-                  addMessage({ role: 'user', content: partialText });
-                  handleStream(partialText);
+                  dispatchTranscript(partialText, 'browser-asr-partial', false);
                 }, PARTIAL_DEBOUNCE_MS);
               }
             }
@@ -390,10 +406,10 @@ export const useVoicePipeline = () => {
     }
   }, [
     getState, transition, softReset, isBrowserASRSupported,
-    handleStream, setTranscript, setPartialTranscript,
+    setTranscript, setPartialTranscript,
     handleWhisperTranscription, handleBargeIn,
     setOnStreamComplete, reenterListening,
-    addMessage, setMicRms, duplexEnabled, startASR,
+    dispatchTranscript, setMicRms, duplexEnabled, startASR,
   ]);
 
   // ═══════════════════════════════════════════════════════
@@ -428,5 +444,5 @@ export const useVoicePipeline = () => {
     };
   }, []);
 
-  return { startPipeline, stopPipeline };
+  return { startPipeline, stopPipeline, handleStream };
 };

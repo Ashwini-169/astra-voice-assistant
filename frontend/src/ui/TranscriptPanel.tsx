@@ -39,7 +39,7 @@ function renderMarkdown(text: string): string {
   return html;
 }
 
-export const TranscriptPanel: React.FC = () => {
+export const TranscriptPanel: React.FC<{ inline?: boolean }> = ({ inline }) => {
   const { chatHistory, state, partialTranscript, response } = useAgentStore();
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -54,16 +54,22 @@ export const TranscriptPanel: React.FC = () => {
   if (!hasContent) return null;
 
   return (
-    <div className="fixed right-0 top-0 h-full w-96 z-40 hidden md:flex flex-col bg-zinc-950/60 backdrop-blur-xl border-l border-white/5">
-      {/* Header */}
-      <div className="flex items-center gap-3 px-5 py-4 border-b border-white/5">
-        <span className="material-symbols-outlined text-[var(--color-primary)] text-lg">forum</span>
-        <h2 className="text-sm font-manrope font-semibold text-white uppercase tracking-wider">Conversation</h2>
-        <span className="ml-auto text-[10px] text-zinc-500">{chatHistory.length} messages</span>
-      </div>
+    <div className={
+      inline
+        ? "flex-1 w-full max-w-5xl mx-auto flex flex-col h-full z-10"
+        : "fixed right-0 top-0 h-full w-96 z-40 hidden md:flex flex-col bg-zinc-950/60 backdrop-blur-xl border-l border-white/5"
+    }>
+      {/* Header (Only in sidebar mode) */}
+      {!inline && (
+        <div className="flex items-center gap-3 px-5 py-4 border-b border-white/5">
+          <span className="material-symbols-outlined text-[var(--color-primary)] text-lg">forum</span>
+          <h2 className="text-sm font-manrope font-semibold text-white uppercase tracking-wider">Conversation</h2>
+          <span className="ml-auto text-[10px] text-zinc-500">{chatHistory.length} messages</span>
+        </div>
+      )}
 
       {/* Chat Messages */}
-      <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-4 space-y-4 custom-scrollbar">
+      <div ref={scrollRef} className={`flex-1 overflow-y-auto px-4 py-4 space-y-4 custom-scrollbar ${inline ? 'pb-40 pt-10' : ''}`}>
         
         {chatHistory.map((msg) => (
           <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
