@@ -279,27 +279,37 @@ async def _speak_edge(payload: Dict[str, Any]) -> Dict[str, Any]:
         raise HTTPException(status_code=502, detail=f"Edge TTS failed: {exc}") from exc
 
 
-def _speak_piper(payload: Dict[str, Any]) -> requests.Response:
-    """Send plain stripped text to Piper TTS server."""
+async def _speak_piper(payload: Dict[str, Any]) -> requests.Response:
+    """Send plain stripped text to Piper TTS server in a background thread.
+
+    Keeps using the synchronous `requests` session (so tests can monkeypatch
+    `tts_service._http_session.post`) but offloads the network call to a
+    thread to avoid blocking the asyncio event loop.
+    """
     runtime = _load_runtime_settings()
     clean_text = strip_emotion_tags(payload["text"])
     piper_payload: Dict[str, Any] = {"text": clean_text, "voice": runtime.piper_voice}
     if runtime.piper_speaker_id is not None:
         piper_payload["speaker_id"] = runtime.piper_speaker_id
-    try:
-        response = _http_session.post(
+
+    def _do_post() -> requests.Response:
+        resp = _http_session.post(
             f"{runtime.piper_api_url}/synthesize",
             json=piper_payload,
             timeout=15,
         )
-        if response.status_code in {400, 404, 422}:
+        if resp.status_code in {400, 404, 422}:
             logger.info("[tts] Piper rejected voice payload; retrying legacy text-only request")
-            response = _http_session.post(
+            resp = _http_session.post(
                 f"{runtime.piper_api_url}/synthesize",
                 json={"text": clean_text},
                 timeout=15,
             )
-        response.raise_for_status()
+        resp.raise_for_status()
+        return resp
+
+    try:
+        response = await asyncio.to_thread(_do_post)
         return response
     except Exception as exc:  # pylint: disable=broad-except
         logger.error("Piper request failed: %s", exc)
@@ -315,7 +325,7 @@ async def _route_edge_with_fallback(payload: Dict[str, Any]) -> Dict[str, Any]:
     is_online = await _network_state.get_status(runtime)
     if not is_online:
         logger.info("[tts] offline detected -> piper fallback")
-        piper_response = _speak_piper(payload)
+        piper_response = await _speak_piper(payload)
         return {"result": {"status_code": piper_response.status_code}, "backend": "piper"}
 
     try:
@@ -323,23 +333,28 @@ async def _route_edge_with_fallback(payload: Dict[str, Any]) -> Dict[str, Any]:
         return {"result": result, "backend": "edge"}
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning("[tts] edge failed (%s) -> piper fallback", exc)
-        piper_response = _speak_piper(payload)
+        piper_response = await _speak_piper(payload)
         return {"result": {"status_code": piper_response.status_code}, "backend": "piper"}
 
 
-def _speak_fish_speech(payload: Dict[str, Any]) -> requests.Response:
-    """Send emotion-tagged text to OpenAudio S1 Mini / Fish-Speech server."""
+async def _speak_fish_speech(payload: Dict[str, Any]) -> requests.Response:
+    """Send emotion-tagged text to OpenAudio S1 Mini / Fish-Speech server in a background thread."""
     runtime = _load_runtime_settings()
     emotion = payload.get("emotion")
     raw_text = payload["text"]
     text_for_model = f"({emotion}){raw_text}" if emotion else raw_text
-    try:
-        response = _http_session.post(
+
+    def _do_post() -> requests.Response:
+        resp = _http_session.post(
             f"{runtime.fish_speech_api_url}/v1/tts",
             json={"text": text_for_model, "streaming": False},
             timeout=60,
         )
-        response.raise_for_status()
+        resp.raise_for_status()
+        return resp
+
+    try:
+        response = await asyncio.to_thread(_do_post)
         return response
     except Exception as exc:  # pylint: disable=broad-except
         logger.error("Fish-Speech request failed: %s", exc)
@@ -364,14 +379,14 @@ async def synthesize(request: SynthesizeRequest):
     runtime = _load_runtime_settings()
     payload = {"text": request.text, "emotion": request.emotion}
     if runtime.backend.lower() == "piper":
-        response = _speak_piper(payload)
+        response = await _speak_piper(payload)
         media_type = response.headers.get("content-type", "audio/wav")
         return FastAPIResponse(content=response.content, media_type=media_type)
     if runtime.backend.lower() == "edge" and runtime.edge_offline_fallback_enabled:
         is_online = await _network_state.get_status(runtime)
         if not is_online:
             logger.info("[tts] /synthesize offline detected -> piper fallback")
-            response = _speak_piper(payload)
+            response = await _speak_piper(payload)
             media_type = response.headers.get("content-type", "audio/wav")
             return FastAPIResponse(content=response.content, media_type=media_type)
 
@@ -413,7 +428,7 @@ async def synthesize(request: SynthesizeRequest):
     except Exception as exc:  # pylint: disable=broad-except
         if runtime.edge_offline_fallback_enabled:
             logger.warning("[tts] /synthesize edge failed (%s) -> piper fallback", exc)
-            response = _speak_piper(payload)
+            response = await _speak_piper(payload)
             media_type = response.headers.get("content-type", "audio/wav")
             return FastAPIResponse(content=response.content, media_type=media_type)
         logger.error("Edge TTS synthesize failed: %s", exc)
@@ -467,10 +482,10 @@ async def speak(request: SpeakRequest) -> SpeakResponse:
 
     if backend == "fish_speech":
         logger.info("[tts] fish_speech backend | emotion=%s | %.60s", request.emotion, request.text)
-        response = _speak_fish_speech(payload)
+        response = await _speak_fish_speech(payload)
     else:
         logger.info("[tts] piper backend | emotion=%s | %.60s", request.emotion, request.text)
-        response = _speak_piper(payload)
+        response = await _speak_piper(payload)
 
     return SpeakResponse(accepted=True, backend_status=response.status_code, backend=backend)
 
