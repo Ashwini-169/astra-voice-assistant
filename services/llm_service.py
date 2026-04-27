@@ -26,6 +26,7 @@ from services.llm_models import (
     RuntimeSettings,
     SettingsUpdate,
 )
+from services.agent_control import run_phase2_agent_loop
 from services.mcp_tools import (
     builtin_servers,
     call_tool,
@@ -80,9 +81,10 @@ def _default_runtime_settings() -> RuntimeSettings:
 
 _runtime_settings = _default_runtime_settings()
 _settings_lock = threading.Lock()
+_tools_lock = threading.Lock()
 
 # Keep agent iterations short to avoid tool-call loops.
-AGENT_MAX_STEPS = 2
+AGENT_MAX_STEPS = 4
 
 # Server-level toggles used by agent/tool routing.
 TOOLS: Dict[str, Dict[str, Any]] = {
@@ -91,7 +93,8 @@ TOOLS: Dict[str, Dict[str, Any]] = {
 
 
 def _is_server_enabled(server: str) -> bool:
-    cfg = TOOLS.get(server)
+    with _tools_lock:
+        cfg = TOOLS.get(server)
     if cfg is None:
         return True
     return bool(cfg.get("enabled", True))
@@ -197,7 +200,8 @@ def _execute_tool_call(call_request: MCPToolCallRequest) -> Dict[str, Any]:
                 "result": None,
             }
 
-        known_tools = TOOLS.get(call_request.server, {}).get("tools")
+        with _tools_lock:
+            known_tools = TOOLS.get(call_request.server, {}).get("tools")
         if isinstance(known_tools, list) and known_tools and call_request.tool not in known_tools:
             return {
                 "ok": False,
@@ -316,6 +320,159 @@ def _extract_json_object(raw: str) -> Dict[str, Any]:
     return json.loads(candidate)
 
 
+_TOOL_ARG_REQUIREMENTS: Dict[str, List[str]] = {
+    "search": ["query"],
+    "search_web": ["query"],
+    "fetch_content": ["url"],
+    "read_page": ["url"],
+    "obsidian_append_content": ["filepath", "content"],
+}
+
+
+def _pick_obsidian_server(tool_specs: List[Dict[str, Any]]) -> Optional[str]:
+    for spec in tool_specs:
+        server = spec["server"].lower()
+        if "obsidian" in server:
+            return server
+    return None
+
+
+def _find_tool_match(
+    tool_specs: List[Dict[str, Any]],
+    tool_name: str,
+    preferred_servers: Optional[List[str]] = None,
+) -> Optional[Dict[str, Any]]:
+    matches = [spec for spec in tool_specs if spec["tool"].lower() == tool_name.lower()]
+    if not matches:
+        return None
+    if preferred_servers:
+        lowered = {s.lower() for s in preferred_servers}
+        preferred = next((spec for spec in matches if spec["server"].lower() in lowered), None)
+        if preferred:
+            return preferred
+    return matches[0]
+
+
+def _route_intent_action(user_query: str, tool_specs: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    query = (user_query or "").strip()
+    lowered = query.lower()
+    if not lowered:
+        return None
+
+    if any(token in lowered for token in ("note", "obsidian", "save", "append")):
+        obsidian_tool = _find_tool_match(tool_specs, "obsidian_append_content")
+        obsidian_server = _pick_obsidian_server(tool_specs)
+        if obsidian_tool and obsidian_server:
+            return {
+                "action": "tool",
+                "tool": "obsidian_append_content",
+                "server": obsidian_server,
+                "arguments": {"filepath": "Agent Inbox.md", "content": query},
+            }
+
+    if lowered.startswith("http://") or lowered.startswith("https://"):
+        for tool_name in ("fetch_content", "read_page"):
+            match = _find_tool_match(tool_specs, tool_name)
+            if match:
+                return {
+                    "action": "tool",
+                    "tool": match["tool"].lower(),
+                    "server": match["server"].lower(),
+                    "arguments": {"url": query},
+                }
+
+    if any(token in lowered for token in ("news", "latest", "headline", "search", "find", "who", "what", "when")):
+        for tool_name in ("search", "search_web"):
+            match = _find_tool_match(tool_specs, tool_name, preferred_servers=["duckduckgo", "browser-search"])
+            if match:
+                return {
+                    "action": "tool",
+                    "tool": match["tool"].lower(),
+                    "server": match["server"].lower(),
+                    "arguments": {"query": query},
+                }
+    return None
+
+
+def _validate_and_repair_action(
+    server_name: Optional[str],
+    tool_name: Optional[str],
+    arguments: Dict[str, Any],
+    tool_specs: List[Dict[str, Any]],
+    user_query: str,
+) -> Dict[str, Any]:
+    repaired_args = dict(arguments or {})
+    repaired_tool = (tool_name or "").strip().lower() or None
+    repaired_server = (server_name or "").strip().lower() or None
+
+    # Tool and argument auto-corrections for known bad planner output.
+    if repaired_tool == "append_content":
+        repaired_tool = "obsidian_append_content"
+    if repaired_tool and repaired_tool.startswith("obsidian") and "path" in repaired_args and "filepath" not in repaired_args:
+        repaired_args["filepath"] = repaired_args.pop("path")
+    if repaired_tool and repaired_tool.startswith("obsidian") and not repaired_server:
+        repaired_server = _pick_obsidian_server(tool_specs)
+
+    if repaired_tool and repaired_server:
+        exact_match = next(
+            (
+                spec
+                for spec in tool_specs
+                if spec["tool"].lower() == repaired_tool and spec["server"].lower() == repaired_server
+            ),
+            None,
+        )
+        if exact_match is None:
+            repaired_server = None
+
+    if repaired_tool and not repaired_server:
+        any_match = _find_tool_match(tool_specs, repaired_tool)
+        if any_match:
+            repaired_server = any_match["server"].lower()
+
+    route_fallback = _route_intent_action(user_query, tool_specs)
+    if (not repaired_tool or not repaired_server) and route_fallback:
+        repaired_tool = route_fallback["tool"]
+        repaired_server = route_fallback["server"]
+        repaired_args = route_fallback["arguments"]
+
+    if not repaired_tool or not repaired_server:
+        search_default = (
+            _find_tool_match(tool_specs, "search", preferred_servers=["duckduckgo", "browser-search"])
+            or _find_tool_match(tool_specs, "search_web", preferred_servers=["duckduckgo", "browser-search"])
+            or (tool_specs[0] if tool_specs else None)
+        )
+        if search_default:
+            repaired_tool = search_default["tool"].lower()
+            repaired_server = search_default["server"].lower()
+            repaired_args = {"query": user_query} if user_query.strip() else {}
+
+    required_args = _TOOL_ARG_REQUIREMENTS.get(repaired_tool or "", [])
+    if "query" in required_args and "query" not in repaired_args and user_query.strip():
+        repaired_args["query"] = user_query.strip()
+    if "url" in required_args and "url" not in repaired_args:
+        query = user_query.strip()
+        if query.startswith("http://") or query.startswith("https://"):
+            repaired_args["url"] = query
+    if "filepath" in required_args and "filepath" not in repaired_args and "path" in repaired_args:
+        repaired_args["filepath"] = repaired_args.pop("path")
+
+    missing_required = [arg for arg in required_args if arg not in repaired_args]
+    if missing_required:
+        fallback = _route_intent_action(user_query, tool_specs)
+        if fallback:
+            repaired_tool = fallback["tool"]
+            repaired_server = fallback["server"]
+            repaired_args = fallback["arguments"]
+
+    return {
+        "action": "tool",
+        "tool": repaired_tool or "search",
+        "server": repaired_server or "duckduckgo",
+        "arguments": repaired_args,
+    }
+
+
 def _normalize_action(action: Dict[str, Any], tool_specs: List[Dict[str, Any]], user_query: str = "") -> Dict[str, Any]:
     """Normalize planner output to a strict tool/server/arguments contract."""
     normalized = dict(action or {})
@@ -365,28 +522,19 @@ def _normalize_action(action: Dict[str, Any], tool_specs: List[Dict[str, Any]], 
         "web_search": "search_web",
         "read": "read_page",
         "fetch": "read_page",
+        "append_content": "obsidian_append_content",
     }
     if tool_name == "duckduckgo":
         tool_name = "search"
     elif tool_name in aliases:
         tool_name = aliases[tool_name]
 
-    # If tool missing, prefer a search-like default from available specs.
-    if not tool_name:
-        preferred = next(
-            (
-                spec
-                for spec in tool_specs
-                if spec["server"].lower() in {"duckduckgo", "browser-search"}
-                and spec["tool"].lower() in {"search", "search_web"}
-            ),
-            None,
-        )
-        if preferred is None and tool_specs:
-            preferred = tool_specs[0]
-        if preferred:
-            server_name = preferred["server"].lower()
-            tool_name = preferred["tool"].lower()
+    intent_action = _route_intent_action(user_query, tool_specs)
+    if not tool_name and intent_action:
+        tool_name = intent_action["tool"]
+        server_name = intent_action["server"]
+        if not arguments:
+            arguments = intent_action["arguments"]
 
     # If server missing/wrong, align to the discovered server for this tool.
     if tool_name:
@@ -406,32 +554,83 @@ def _normalize_action(action: Dict[str, Any], tool_specs: List[Dict[str, Any]], 
                 server_name = server_matches[0]["server"].lower()
                 tool_name = server_matches[0]["tool"].lower()
 
-    if not server_name and tool_specs:
-        server_name = tool_specs[0]["server"].lower()
+    repaired = _validate_and_repair_action(server_name, tool_name, arguments, tool_specs, user_query)
+    return repaired
 
-    if not arguments and tool_name in {"search", "search_web"} and user_query.strip():
-        arguments = {"query": user_query}
 
-    if (not tool_name or not server_name) and tool_specs:
-        preferred = next(
-            (
-                spec
-                for spec in tool_specs
-                if spec["server"].lower() == "duckduckgo" and spec["tool"].lower() in {"search", "fetch_content"}
-            ),
-            None,
-        )
-        if preferred is None:
-            preferred = tool_specs[0]
-        server_name = server_name or preferred["server"].lower()
-        tool_name = tool_name or preferred["tool"].lower()
+def _tool_requirements_from_specs(tool_specs: List[Dict[str, Any]]) -> Dict[str, List[str]]:
+    """Build strict required-argument map for the current tool catalog."""
+    requirements: Dict[str, List[str]] = {}
+    for spec in tool_specs:
+        server = str(spec.get("server", "")).strip().lower()
+        tool = str(spec.get("tool", "")).strip().lower()
+        if not server or not tool:
+            continue
+        key = f"{server}.{tool}"
+        req = _TOOL_ARG_REQUIREMENTS.get(tool, [])
+        requirements[key] = list(req)
+    return requirements
 
+
+def _validate_action_contract(
+    action: Dict[str, Any],
+    tool_specs: List[Dict[str, Any]],
+    tool_requirements: Dict[str, List[str]],
+) -> tuple[bool, Optional[str], Optional[Dict[str, Any]]]:
+    """Validate normalized planner action against discovered tools and arg schema."""
+    action_type = str(action.get("action", "tool")).strip().lower()
+    if action_type == "final":
+        response = str(action.get("response", "")).strip()
+        if not response:
+            return False, "final action missing response", None
+        return True, None, {"type": "final"}
+
+    server = str(action.get("server", "")).strip().lower()
+    tool = str(action.get("tool", "")).strip().lower()
+    args = action.get("arguments")
+    if not isinstance(args, dict):
+        return False, "arguments must be an object", None
+    if not server or not tool:
+        return False, "missing server/tool", None
+
+    match = next(
+        (spec for spec in tool_specs if str(spec.get("server", "")).lower() == server and str(spec.get("tool", "")).lower() == tool),
+        None,
+    )
+    if match is None:
+        return False, f"tool not available: {server}.{tool}", None
+
+    key = f"{server}.{tool}"
+    missing = [name for name in tool_requirements.get(key, []) if name not in args]
+    if missing:
+        return False, f"missing required arguments: {', '.join(missing)}", {"missing": missing}
+
+    return True, None, {"type": "tool", "server": server, "tool": tool}
+
+
+def _agent_ok(response_text: str, trace: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Uniform agent response contract with backward-compatible fields."""
+    result = {"response": response_text, "steps": trace}
     return {
-        "action": "tool",
-        "tool": tool_name or "search",
-        "server": server_name or "duckduckgo",
-        "arguments": arguments,
+        "success": True,
+        "error": None,
+        "result": result,
+        "status": "ok",
+        "response": response_text,
+        "steps": trace,
     }
+
+
+def _agent_error(message: str, trace: Optional[List[Dict[str, Any]]] = None, status_code: int = 502) -> HTTPException:
+    payload = {
+        "success": False,
+        "error": message,
+        "result": None,
+        "status": "error",
+        "response": "",
+        "steps": trace or [],
+    }
+    return HTTPException(status_code=status_code, detail=payload)
 
 
 def _llm_call_text(prompt: str, settings_obj: RuntimeSettings) -> str:
@@ -699,9 +898,11 @@ async def call_docker_tool_alias(request: MCPToolCallRequest):
 @app.post("/tools/toggle")
 async def toggle_tool(request: ToolToggleRequest):
     server = request.server
-    current = TOOLS.setdefault(server, {"enabled": True, "tools": []})
-    current["enabled"] = not bool(current.get("enabled", True))
-    return {"status": "ok", "server": server, "enabled": bool(current["enabled"])}
+    with _tools_lock:
+        current = TOOLS.setdefault(server, {"enabled": True, "tools": []})
+        current["enabled"] = not bool(current.get("enabled", True))
+        enabled = bool(current["enabled"])
+    return {"status": "ok", "server": server, "enabled": enabled}
 
 
 @app.post("/agent/loop")
@@ -710,141 +911,30 @@ async def agent_loop(request: AgentLoopRequest):
     settings_obj = _load_effective_settings(request.model_dump(exclude_none=True))
     max_steps = min(max(request.max_steps, 1), AGENT_MAX_STEPS)
 
-    tool_specs, unavailable_servers = _build_tool_specs()
-
-    trace = []
-    user_task = request.prompt
-    final_response = ""
+    def _phase2_llm_call(prompt: str) -> str:
+        return _llm_call_text(prompt, settings_obj)
 
     try:
-        if not tool_specs:
-            fallback = (
-                "No MCP tools are currently available. "
-                "Check MCP server health and retry after at least one server is running."
+        async def _phase2_execute(action: Any) -> Dict[str, Any]:
+            req = MCPToolCallRequest(
+                server=str(getattr(action, "server", "")),
+                tool=str(getattr(action, "tool", "")),
+                arguments=dict(getattr(action, "arguments", {}) or {}),
             )
-            llm_metrics.record_success(time.perf_counter() - start, fallback)
-            return {"status": "ok", "steps": trace, "response": fallback}
+            return _execute_tool_call(req)
 
-        for step in range(1, max_steps + 1):
-            planner_prompt = (
-                "You are a STRICT tool selector for an AI agent.\n\n"
-                "Your job is to return EXACTLY ONE JSON object.\n\n"
-                "DO NOT explain anything.\n"
-                "DO NOT add text.\n"
-                "DO NOT change schema.\n\n"
-                "Return ONLY:\n\n"
-                "{\n"
-                '  "tool": "<tool_name>",\n'
-                '  "server": "<server_name>",\n'
-                '  "arguments": { ... }\n'
-                "}\n\n"
-                "RULES:\n\n"
-                "1. tool MUST be a STRING\n"
-                '   - ✅ "search"\n'
-                '   - ❌ { "name": "search" }\n\n'
-                "2. server MUST be a STRING\n"
-                '   - ✅ "duckduckgo"\n'
-                '   - ❌ "server:duckduckgo"\n\n'
-                "3. NEVER use dot notation\n"
-                '   - ❌ "duckduckgo.search"\n\n'
-                "4. NEVER wrap tool inside object\n"
-                '   - ❌ "tool": { "name": "search" }\n\n'
-                "5. arguments MUST be an object\n\n"
-                "6. If unsure, choose a search-capable tool from the available list and pass the user query in arguments.\n\n"
-                "AVAILABLE TOOLS:\n"
-                + "\n".join([f"- {t['server']}: {t['tool']}" for t in tool_specs]) + "\n\n"
-                + (
-                    "UNAVAILABLE SERVERS (DO NOT USE):\n"
-                    + "\n".join([f"- {s['server']} (status: {s['status']})" for s in unavailable_servers])
-                    + "\n\n"
-                    if unavailable_servers
-                    else ""
-                )
-                + "USER QUERY:\n"
-                f"{user_task}\n\n"
-                f"TRACE (History): {json.dumps(trace)}\n"
-            )
-            
-            logger.info("========================================")
-            logger.info("ðŸ§  STEP %d: Planning...", step)
-            step_start_time = time.perf_counter()
-            raw_action = _llm_call_text(planner_prompt, settings_obj)
-            logger.info("â±ï¸ LLM Planning took %.3fs", time.perf_counter() - step_start_time)
-            
-            logger.info("RAW LLM OUTPUT: %s", raw_action)
-            
-            # Auto-Retry for LLM format failure
-            if "{" not in raw_action or "}" not in raw_action:
-                logger.warning("LLM failed to output JSON, injecting strict constraint and retrying...")
-                retry_prompt = planner_prompt + "\n\nERROR: You did not output JSON. You MUST output ONLY a JSON object."
-                raw_action = _llm_call_text(retry_prompt, settings_obj)
-                logger.info("RETRY RAW LLM OUTPUT: %s", raw_action)
-            
-            try:
-                action = _extract_json_object(raw_action)
-            except Exception as e:
-                logger.warning("Failed to parse LLM response as JSON: %s", raw_action)
-                trace.append({"step": step, "error": f"Invalid JSON response: {str(e)}", "raw": raw_action})
-                continue
-
-            # Normalize to strict tool/server/arguments contract.
-            action = _normalize_action(action, tool_specs, user_query=user_task)
-            action_type = action.get("action", "tool")
-
-            if action_type == "final":
-                final_response = str(action.get("response", ""))
-                if not final_response:
-                    final_response = raw_action.strip()
-                break
-
-            call_request = MCPToolCallRequest(
-                server=str(action.get("server", "")),
-                tool=str(action.get("tool", "")),
-                arguments=action.get("arguments", {}) or {},
-            )
-            
-            logger.info("ðŸ› ï¸ EXEC: %s:%s %s", call_request.server, call_request.tool, call_request.arguments)
-            # Execution with typed error capture
-            tool_start = time.perf_counter()
-            tool_result = _execute_tool_call(call_request)
-            if not tool_result.get("ok", False):
-                logger.warning(
-                    "TOOL ERROR (%s): %s",
-                    tool_result.get("error_type", "unknown"),
-                    tool_result.get("error", ""),
-                )
-            else:
-                logger.info("TOOL SUCCESS")
-
-            tool_latency = time.perf_counter() - tool_start
-            trace.append(
-                {
-                    "step": step,
-                    "tool": {"server": call_request.server, "name": call_request.tool},
-                    "arguments": call_request.arguments,
-                    "result": tool_result,
-                    "latency_ms": int(tool_latency * 1000),
-                }
-            )
-            if tool_result.get("ok") and tool_result.get("result") is not None:
-                break
-            logger.info("========================================")
-
-        if not final_response:
-            summary_prompt = (
-                "Write a concise final answer for the user based on this trace.\\n"
-                f"User task: {user_task}\\n"
-                f"Trace: {json.dumps(trace)}"
-            )
-            final_response = _llm_call_text(summary_prompt, settings_obj)
-
-        llm_metrics.record_success(time.perf_counter() - start, final_response)
-        return {"status": "ok", "steps": trace, "response": final_response}
-
+        payload = await run_phase2_agent_loop(
+            user_query=request.prompt,
+            max_steps=max_steps,
+            llm_call=_phase2_llm_call,
+            execute_fn=_phase2_execute,
+        )
+        llm_metrics.record_success(time.perf_counter() - start, str(payload.get("response", "")))
+        return payload
     except Exception as exc:  # pylint: disable=broad-except
         llm_metrics.record_error(time.perf_counter() - start)
-        logger.error("Agent loop failed: %s", exc)
-        raise HTTPException(status_code=502, detail="Agent loop failed") from exc
+        logger.exception("Agent loop failed: %s", exc)
+        raise _agent_error("Agent loop failed", trace=[], status_code=502) from exc
 
 
 @app.get("/metrics")
@@ -872,5 +962,3 @@ if __name__ == "__main__":
 
     settings = get_settings()
     run(app, host=settings.llm_host, port=settings.llm_port, log_level=settings.log_level.lower())
-
-

@@ -233,3 +233,79 @@ def test_toggle_builtin_server_reflected_in_list():
 
         enable = client.patch("/mcp/servers/browser-search/enabled", json={"enabled": True})
         assert enable.status_code == 200
+
+
+def test_normalize_action_auto_corrects_obsidian_append_schema():
+    tool_specs = [{"server": "obsidian", "tool": "obsidian_append_content"}]
+    action = {
+        "server": "obsidian",
+        "tool": "append_content",
+        "arguments": {"path": "Daily.md", "content": "hello"},
+    }
+
+    normalized = llm_service._normalize_action(action, tool_specs, user_query="save note")  # pylint: disable=protected-access
+
+    assert normalized["server"] == "obsidian"
+    assert normalized["tool"] == "obsidian_append_content"
+    assert normalized["arguments"]["filepath"] == "Daily.md"
+    assert normalized["arguments"]["content"] == "hello"
+
+
+def test_normalize_action_routes_news_to_search_when_tool_invalid():
+    tool_specs = [
+        {"server": "duckduckgo", "tool": "search"},
+        {"server": "obsidian", "tool": "obsidian_append_content"},
+    ]
+    action = {"server": "obsidian", "tool": "obsidian_append_content", "arguments": {"filepath": "x.md"}}
+
+    normalized = llm_service._normalize_action(action, tool_specs, user_query="latest ai news")  # pylint: disable=protected-access
+
+    # Missing required content forces fallback; intent router should choose search.
+    assert normalized["server"] == "duckduckgo"
+    assert normalized["tool"] == "search"
+    assert normalized["arguments"]["query"] == "latest ai news"
+
+
+def test_agent_loop_returns_uniform_response_contract(monkeypatch):
+    outputs = iter([
+        '{"action":"final","response":"done"}',
+    ])
+    monkeypatch.setattr(llm_service, "_llm_call_text", lambda _prompt, _settings: next(outputs))
+    monkeypatch.setattr(
+        llm_service,
+        "list_servers",
+        lambda: {"builtin": [{"name": "file-search", "tools": ["search_files"]}], "custom": []},
+    )
+    monkeypatch.setattr(llm_service.mcp_bridge, "list_servers", lambda: [])
+    monkeypatch.setattr(llm_service.mcp_bridge, "list_all_tools", lambda: [])
+
+    with TestClient(llm_service.app) as client:
+        response = client.post("/agent/loop", json={"prompt": "test envelope", "max_steps": 1})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["success"] is True
+    assert body["error"] is None
+    assert isinstance(body["result"], dict)
+    assert body["result"]["response"] == "done"
+    assert "steps" in body["result"]
+    # Backward-compatible fields remain available.
+    assert body["status"] == "ok"
+    assert body["response"] == "done"
+
+
+def test_validate_action_contract_rejects_missing_required_args():
+    tool_specs = [{"server": "browser-search", "tool": "read_page"}]
+    requirements = llm_service._tool_requirements_from_specs(tool_specs)  # pylint: disable=protected-access
+    action = {"action": "tool", "server": "browser-search", "tool": "read_page", "arguments": {}}
+
+    valid, error, meta = llm_service._validate_action_contract(  # pylint: disable=protected-access
+        action,
+        tool_specs,
+        requirements,
+    )
+
+    assert valid is False
+    assert "missing required arguments" in str(error)
+    assert isinstance(meta, dict)
+    assert meta["missing"] == ["url"]
