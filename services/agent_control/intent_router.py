@@ -1,3 +1,9 @@
+"""Intent router: returns candidate tool keys for a given query.
+
+Responsibility: return ALL tools whose category could be relevant to the query.
+Category filtering (what's allowed NEXT) is handled by transitions.py.
+These two systems must NOT conflict — intent_router only gates the FIRST step.
+"""
 from __future__ import annotations
 
 from typing import Dict, List
@@ -5,69 +11,68 @@ from typing import Dict, List
 from .types import ToolSchema
 
 
-def _matches_search(tool: ToolSchema) -> bool:
-    name = tool.name.lower()
-    return "query" in tool.required_args or "search" in name
-
-
-def _matches_fetch(tool: ToolSchema) -> bool:
-    name = tool.name.lower()
-    return "url" in tool.required_args or "fetch" in name or "read" in name
-
-
-def _matches_storage(tool: ToolSchema) -> bool:
-    name = tool.name.lower()
-    return "filepath" in tool.required_args or "save" in name or "append" in name or "write" in name
-
-
-def _matches_time(tool: ToolSchema) -> bool:
-    name = tool.name.lower()
-    category = tool.category.lower()
-    return "time" in name or "time" in category or "timezone" in name or "convert" in name
-
-
-def _matches_file(tool: ToolSchema) -> bool:
-    name = tool.name.lower()
-    return "file" in name or "path" in tool.required_args
+def _category_matches_query(category: str, query: str) -> bool:
+    """Return True if a tool category is relevant to the query."""
+    q = query.lower()
+    
+    # ISSUE 2 FIX: Intent-to-tool binding for time queries
+    if category == "time_current" or category == "time_convert" or category == "time":
+        # Distinguish between "current time" and "time conversion"
+        has_current_intent = any(t in q for t in ("what time", "current time", "time now", "time in", "time at"))
+        has_convert_intent = any(t in q for t in ("convert", "from", "to", "between"))
+        
+        # If asking for current time, prefer get_current_time
+        # If asking for conversion, prefer convert_time
+        return has_current_intent or has_convert_intent or any(t in q for t in ("time", "clock", "timezone", "zone", "hour", "minute", "date", "today", "now"))
+    
+    if category == "fetch":
+        return "http://" in q or "https://" in q or any(t in q for t in ("url", "webpage", "website", "read", "open"))
+    
+    # ISSUE 4 FIX: Better storage vs list detection
+    if category == "storage":
+        # Storage is for WRITING (save, append, create)
+        return any(t in q for t in ("save", "append", "store", "write", "create", "add to", "update")) and "obsidian" in q
+    
+    # ISSUE 4 FIX: Add "list" category for listing operations
+    if category == "list" or category == "unknown":
+        # List operations: show, list, check, view
+        if any(t in q for t in ("list", "show", "check", "view", "files", "vault", "directory", "folder")):
+            return True
+    
+    if category == "search":
+        # CRITICAL FIX: Default to search for most queries
+        # Only exclude if it's clearly NOT a search query
+        exclude_keywords = ["list", "show files", "check files", "view files", "save", "append", "write", "create"]
+        if any(kw in q for kw in exclude_keywords):
+            return False
+        # Include search for general queries, news, research, etc.
+        return True
+    
+    return True  # unknown category — include it
 
 
 def route_intent(user_query: str, schemas: Dict[str, ToolSchema]) -> List[str]:
-    """Deterministic keyword/rule based intent routing (no LLM)."""
+    """Return candidate tool keys relevant to the query.
+
+    Returns ALL tools whose category matches the query intent.
+    Does NOT restrict to a single category — that is transitions.py's job.
+    Falls back to all tools if nothing matches.
+    """
+    from .capability_map import filter_tools_by_domain
+    
     q = (user_query or "").strip().lower()
     if not q:
-        return []
+        return sorted(schemas.keys())
 
-    tools = list(schemas.items())
+    # CRITICAL FIX: Domain-aware filtering FIRST
+    all_tools = sorted(schemas.keys())
+    domain_filtered = filter_tools_by_domain(q, all_tools)
+    
+    # Then apply category matching within domain
+    matched = [
+        key for key in domain_filtered
+        if _category_matches_query(schemas[key].category, q)
+    ]
 
-    # Time queries - highest priority for time-related tools
-    if any(token in q for token in ("time", "clock", "timezone", "zone", "hour", "minute", "date", "today", "now")):
-        candidates = [key for key, schema in tools if _matches_time(schema)]
-        if candidates:
-            return sorted(candidates)
-
-    # URL/fetch queries
-    if "http://" in q or "https://" in q or "url" in q or "webpage" in q or "website" in q:
-        candidates = [key for key, schema in tools if _matches_fetch(schema)]
-        if candidates:
-            return sorted(candidates)
-
-    # File queries
-    if any(token in q for token in ("file", "folder", "directory", "path")):
-        candidates = [key for key, schema in tools if _matches_file(schema)]
-        if candidates:
-            return sorted(candidates)
-
-    # Storage queries
-    if any(token in q for token in ("note", "save", "append", "store", "write")):
-        candidates = [key for key, schema in tools if _matches_storage(schema)]
-        if candidates:
-            return sorted(candidates)
-
-    # Search queries - lower priority, only if no specialized tool matches
-    if any(token in q for token in ("news", "latest", "headline", "search", "find", "who", "what", "tell me about")):
-        candidates = [key for key, schema in tools if _matches_search(schema)]
-        if candidates:
-            return sorted(candidates)
-
-    # Fallback: return all tools sorted
-    return sorted([key for key, _ in tools])
+    # Return domain-filtered tools if any matched, otherwise all domain tools
+    return matched if matched else domain_filtered

@@ -117,6 +117,27 @@ Microphone → VAD → Whisper ASR → Intent → Memory Retrieval
 → AudioPlaybackEngine (ordered PCM queue)
 ```
 
+### Two LLM Modes (Production Architecture)
+
+**Mode A — Agent Mode (non-stream)**
+- Used for: planning, tool selection, synthesis
+- Implementation: `_llm_call_text(..., stream=False)` in `llm_service.py`
+- Why: tools need full context, partial tokens break reasoning logic
+- Flow: Agent loop → synthesize final answer → `_text_to_token_stream` → TTS
+
+**Mode B — Streaming Mode (duplex/voice)**
+- Used for: direct responses, TTS pipeline, low-latency UX
+- Implementation: `stream_llm(...)` in `llm_streamer.py`
+- Why: sub-second first-audio latency for voice interaction
+- Flow: LLM stream → EmotionStreamBuffer → adaptive chunking → TTS
+
+**Current Status**: Both modes fully implemented and working
+- `run_pipeline_streaming`: routes automatically via `_needs_tools(text)`
+  - Tool query → Mode A: `_call_agent()` → `_text_to_token_stream()` → TTS
+  - Chat query → Mode B: `stream_llm()` → `stream_tts_from_tokens()`
+- Agent `/agent/loop`: Mode A (generate_non_stream → synthesis)
+- Duplex loop in `main.py`: VAD → Whisper → `run_pipeline_streaming` (auto-routes)
+
 ### Cancellation / Interruption Chain
 `asyncio.Event` (cancellation_event) + `InterruptController.is_triggered()` + `is_generation_current_fn()` — checked at every async boundary in pipeline, llm_streamer, and tts_streamer.
 
@@ -143,19 +164,14 @@ Auto-reload is implemented via `dev_manager.py` restart logic (PID rotation), NO
 ### Dynamic Tool-Aware Agent
 The agent system dynamically loads all available tools from MCP registries at runtime:
 - `catalog.py`: `load_catalog()` discovers tools from builtin, custom, and Docker MCP servers
-- `intent_router.py`: Priority-based routing matches query keywords to tool categories:
-  - Time queries → time tools (highest priority)
-  - URL/webpage queries → fetch tools
-  - File queries → file tools
-  - Storage queries → save/write tools
-  - General knowledge → search tools (lowest priority, fallback only)
-- `planner.py`: `build_planner_prompt()` presents full tool details to LLM with:
-  - Tool name, server, category, "Best used for" description
-  - Required and optional arguments with types and descriptions
-  - Tool selection strategy (prefer specialized over generic)
-  - Decision process with examples (time→time tools, content→fetch, knowledge→search)
-- LLM receives comprehensive tool information for intelligent capability-aware selection
-- No hardcoded tool lists — all tools auto-discovered, routing via keyword matching
+- `intent_router.py`: Returns ALL tools whose category matches query intent — does NOT pre-filter by single category. `transitions.py` handles what's allowed next.
+- `planner.py`: Capability-based output — LLM selects abstract capability (`search`, `fetch`, `time`, `storage`) not tool names. `_capability_to_tool()` resolves capability → best available tool via registry priority. Eliminates alias mismatch errors.
+- `control_plane.py`: After tool execution, synthesizes final answer from results using LLM
+- `should_stop` only triggers on `fetch`/`summarize` category results — search results are intermediate, never final
+- Multi-step chain enforced: `search` → `fetch_content` → `final` (3 steps for news/content queries)
+- Fallback: when `filtered_candidates=[]`, expands back to all candidates (never blocks loop)
+- Workflow enforcement: after `search`, only `fetch` candidates are offered to planner (prevents premature final)
+- Unknown-category tools excluded from first step to reduce noise
 
 ### Schema Architecture (Type Safety)
 - `CatalogTool`: raw tool from MCP registry (has `.tool`, `.description`, `.input_schema`)
@@ -163,3 +179,18 @@ The agent system dynamically loads all available tools from MCP registries at ru
 - `PlannerAction`: LLM output representation (has `.tool`, `.server`, `.arguments`)
 - Flow: `CatalogTool` → `normalize_schemas()` → `ToolSchema` → planner → `PlannerAction`
 - Planner receives both `schema_map` (normalized) and `catalog` (full details) for rich prompts
+
+### Agent Memory + RAG Architecture
+- `agent_memory.py`: `AgentSessionMemory` — short-term state per turn (search results, selected URL, fetched content, entities)
+- RAG retrieval via `load_rag_context(query)` at turn start — pulls relevant past interactions from Qdrant
+- Session context injected into every planner prompt so LLM can reference prior steps
+- After each tool step, `session.update_from_step()` stores structured output (URLs, content, metrics)
+- Final response saved to Qdrant via `save_agent_result()` for future retrieval
+- No hardcoding — all context flows from live execution state
+
+### Capability Registry (Tool Priority Policy)
+- `capability_registry.py`: maps category → server priority order, loaded from `mcp_config.json`
+- Schema: `{"capability_policy": {"search": [{"server": "duckduckgo", "priority": 0.95}], ...}}`
+- `score_tool()` blends 60% runtime health + 40% policy priority
+- `category_chain()` drives transitions without hardcoded tool names
+- Add new tool server: register in `mcp_config.json` under correct category, no code change needed

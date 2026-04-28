@@ -32,14 +32,32 @@ def infer_category(tool_name: str, arg_names: Iterable[str] | None = None) -> st
     lowered = str(tool_name or "").strip().lower()
     args = {str(arg).strip().lower() for arg in (arg_names or []) if str(arg).strip()}
 
+    # ISSUE 4 FIX: Better categorization for Obsidian list tools
+    # List operations should be "list" category, not "unknown"
+    if any(token in lowered for token in ("list_files", "list_", "get_files", "show_files")):
+        return "list"
+    
+    # ISSUE 2 FIX: Distinguish between time tools
+    if "convert" in lowered and "time" in lowered:
+        return "time_convert"
+    if "current" in lowered and "time" in lowered:
+        return "time_current"
     if "timezone" in args or "time" in lowered or "timezone" in lowered or "date" in lowered:
         return "time"
+    
     if "query" in args or "search" in lowered:
         return "search"
     if "url" in args or any(token in lowered for token in ("fetch", "read", "crawl", "open", "visit")):
         return "fetch"
     if any(token in lowered for token in ("summarize", "summary", "answer", "synthesize")):
         return "summarize"
-    if "filepath" in args or any(token in lowered for token in ("save", "append", "store", "write")):
+    
+    # Storage is for WRITING operations only
+    if "filepath" in args and any(token in lowered for token in ("save", "append", "store", "write", "patch", "delete", "create")):
         return "storage"
+    
+    # Reading operations (get_file_contents) should be "fetch" not "storage"
+    if "filepath" in args and any(token in lowered for token in ("get", "read", "fetch", "retrieve")):
+        return "fetch"
+    
     return "unknown"

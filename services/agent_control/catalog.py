@@ -176,9 +176,17 @@ async def load_catalog(health_store: ToolHealthStore) -> Tuple[List[CatalogTool]
 
 
 def score_tool(row: CatalogTool) -> float:
-    """Higher score means better candidate for selection."""
-    availability = float(row.health.get("availability", 0.0))
+    """Higher score means better candidate for selection.
+
+    Combines runtime health metrics with configured capability priority
+    so policy-preferred tools rank above equally-healthy alternatives.
+    """
+    from .capability_registry import priority_for_tool
+    availability = float(row.health.get("availability", 1.0))
     latency = float(row.health.get("latency", 0.0))
     failure_rate = float(row.health.get("failure_rate", 0.0))
     latency_penalty = min(1.0, latency / 5000.0)
-    return (availability * 1.0) - (failure_rate * 0.7) - (latency_penalty * 0.3)
+    health_score = (availability * 1.0) - (failure_rate * 0.7) - (latency_penalty * 0.3)
+    policy_priority = priority_for_tool(row.server, row.category)
+    # Blend: 60% health, 40% policy priority
+    return (health_score * 0.6) + (policy_priority * 0.4)

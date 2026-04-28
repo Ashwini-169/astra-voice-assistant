@@ -1,7 +1,14 @@
 """Docker MCP STDIO Bridge.
 
-Manages Docker-based MCP servers via JSON-RPC 2.0 over STDIO transport.
-Supports lifecycle management:  start → discover tools → call tools → stop.
+Two execution modes per server:
+
+- persistent (default): long-lived process, MCP handshake once, reuse for all calls.
+  Works for: mcp/time, mcp/fetch, mcp/duckduckgo, mcp/youtube_transcript
+
+- oneshot: fresh container per tool call, full MCP handshake inline, container exits.
+  Works for: mcp/obsidian (and any image that exits after one request)
+  Detected automatically when persistent start fails, or forced via
+  register_server(oneshot=True).
 """
 import json
 #  
@@ -27,22 +34,202 @@ def _next_id() -> int:
 
 
 class MCPDockerServer:
-    """A single running Docker MCP server process."""
+    """A single Docker MCP server — persistent or one-shot.
 
-    def __init__(self, name: str, command: str, args: List[str], env: Optional[Dict[str, str]] = None):
+    Persistent mode: process stays alive between calls (mcp/time, mcp/fetch).
+    One-shot mode:   fresh container per call, full handshake inline (mcp/obsidian).
+    """
+
+    # Known one-shot images (substring match on any arg)
+    _ONESHOT_IMAGES = {"obsidian"}
+
+    def __init__(self, name: str, command: str, args: List[str],
+                 env: Optional[Dict[str, str]] = None,
+                 oneshot: Optional[bool] = None):
         self.name = name
         self.command = command
         self.args = args
         self.env = env or {}
         self.process: Optional[subprocess.Popen] = None
         self.tools: List[Dict[str, Any]] = []
-        self.status: str = "stopped"  # stopped | starting | running | error
+        self.status: str = "stopped"
         self._read_lock = threading.Lock()
         self._write_lock = threading.Lock()
         self._initialized = False
+        # Auto-detect one-shot from image name if not forced
+        if oneshot is None:
+            joined = " ".join(args).lower()
+            oneshot = any(img in joined for img in self._ONESHOT_IMAGES)
+        self.oneshot: bool = oneshot
+
+    # ── One-shot execution ────────────────────────────────────────────
+
+    def _run_oneshot(self, tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """Spawn a fresh container, run full MCP handshake, call tool, return result."""
+        import os
+        run_env = os.environ.copy()
+        run_env.update(self.env)
+
+        try:
+            proc = subprocess.Popen(
+                [self.command] + self.args,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=run_env,
+                bufsize=0,
+            )
+        except Exception as exc:
+            return {"ok": False, "error_type": "spawn", "status_code": 503,
+                    "error": f"Failed to start container: {exc}"}
+
+        def _write(obj: Dict[str, Any]) -> None:
+            proc.stdin.write((json.dumps(obj) + "\n").encode())
+            proc.stdin.flush()
+
+        def _read(timeout: float = 15.0) -> Optional[Dict[str, Any]]:
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                line = proc.stdout.readline()
+                if not line:
+                    break
+                try:
+                    return json.loads(line.decode().strip())
+                except json.JSONDecodeError:
+                    continue
+            return None
+
+        try:
+            # 1. initialize
+            _write({"jsonrpc": "2.0", "id": _next_id(), "method": "initialize",
+                    "params": {"protocolVersion": "2024-11-05", "capabilities": {},
+                               "clientInfo": {"name": "astra-voice", "version": "1.0.0"}}})
+            init_resp = _read(10.0)
+            if not init_resp:
+                proc.kill()
+                return {"ok": False, "error_type": "timeout", "status_code": 504,
+                        "error": "No initialize response from container"}
+
+            # 2. initialized notification
+            _write({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}})
+
+            # 3. call tool
+            call_id = _next_id()
+            _write({"jsonrpc": "2.0", "id": call_id, "method": "tools/call",
+                    "params": {"name": tool_name, "arguments": arguments}})
+
+            # Read until we get our call response
+            deadline = time.time() + 20.0
+            while time.time() < deadline:
+                line = proc.stdout.readline()
+                if not line:
+                    break
+                try:
+                    resp = json.loads(line.decode().strip())
+                except json.JSONDecodeError:
+                    continue
+                if resp.get("id") == call_id:
+                    if "error" in resp:
+                        logger.error("[MCP:%s] oneshot RPC error: %s", self.name, resp["error"])
+                        return {"ok": False, "error_type": "rpc", "status_code": 502,
+                                "error": str(resp["error"])}
+                    result = resp.get("result", {})
+                    texts = [item.get("text", "") for item in result.get("content", [])
+                             if item.get("type") == "text"]
+                    return {"ok": True, "status_code": 200,
+                            "result": "\n".join(texts) if texts else result}
+
+            return {"ok": False, "error_type": "timeout", "status_code": 504,
+                    "error": f"No tool response from '{self.name}'"}
+
+        except Exception as exc:
+            logger.error("[MCP:%s] oneshot failed: %s", self.name, exc)
+            return {"ok": False, "error_type": "error", "status_code": 500, "error": str(exc)}
+        finally:
+            try:
+                proc.stdin.close()
+                proc.terminate()
+                proc.wait(timeout=5)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+
+    # ── Persistent mode ───────────────────────────────────────────────
+
+    def _discover_tools_oneshot(self) -> List[Dict[str, Any]]:
+        """Discover tools from a one-shot container (tools/list then exit)."""
+        import os
+        run_env = os.environ.copy()
+        run_env.update(self.env)
+        try:
+            proc = subprocess.Popen(
+                [self.command] + self.args,
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, env=run_env, bufsize=0,
+            )
+            init_id = _next_id()
+            proc.stdin.write((json.dumps({"jsonrpc": "2.0", "id": init_id,
+                "method": "initialize",
+                "params": {"protocolVersion": "2024-11-05", "capabilities": {},
+                           "clientInfo": {"name": "astra-voice", "version": "1.0.0"}}}) + "\n").encode())
+            proc.stdin.flush()
+            # wait for init response
+            deadline = time.time() + 8.0
+            while time.time() < deadline:
+                line = proc.stdout.readline()
+                if not line:
+                    break
+                try:
+                    r = json.loads(line.decode().strip())
+                    if r.get("id") == init_id:
+                        break
+                except json.JSONDecodeError:
+                    continue
+            proc.stdin.write((json.dumps({"jsonrpc": "2.0",
+                "method": "notifications/initialized", "params": {}}) + "\n").encode())
+            proc.stdin.flush()
+            list_id = _next_id()
+            proc.stdin.write((json.dumps({"jsonrpc": "2.0", "id": list_id,
+                "method": "tools/list", "params": {}}) + "\n").encode())
+            proc.stdin.flush()
+            deadline = time.time() + 8.0
+            while time.time() < deadline:
+                line = proc.stdout.readline()
+                if not line:
+                    break
+                try:
+                    r = json.loads(line.decode().strip())
+                    if r.get("id") == list_id:
+                        return r.get("result", {}).get("tools", [])
+                except json.JSONDecodeError:
+                    continue
+        except Exception as exc:
+            logger.warning("[MCP:%s] oneshot tool discovery failed: %s", self.name, exc)
+        finally:
+            try:
+                proc.stdin.close()
+                proc.terminate()
+                proc.wait(timeout=3)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+        return []
 
     def start(self) -> bool:
-        """Start the Docker container and initialize the MCP session."""
+        """Start the server. One-shot servers discover tools then mark running."""
+        if self.oneshot:
+            # Discover tools via a throwaway container
+            self.status = "starting"
+            self.tools = self._discover_tools_oneshot()
+            self.status = "running"
+            logger.info("[MCP:%s] oneshot ready, %d tools: %s",
+                        self.name, len(self.tools), [t.get("name") for t in self.tools])
+            return True
+
         if self.process and self.process.poll() is None:
             logger.warning("[MCP:%s] Already running", self.name)
             return True
@@ -63,7 +250,6 @@ class MCPDockerServer:
             )
             logger.info("[MCP:%s] Process started (pid=%d)", self.name, self.process.pid)
 
-            # MCP protocol: initialize handshake
             init_result = self._send_request("initialize", {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {},
@@ -71,14 +257,15 @@ class MCPDockerServer:
             })
 
             if init_result is None:
-                self.status = "error"
-                return False
+                # Persistent start failed — fall back to one-shot mode
+                logger.warning("[MCP:%s] Persistent init failed, switching to oneshot mode", self.name)
+                self.stop()
+                self.oneshot = True
+                return self.start()
 
-            # Send initialized notification
             self._send_notification("notifications/initialized", {})
             self._initialized = True
 
-            # Discover tools
             tools_result = self._send_request("tools/list", {})
             if tools_result and "tools" in tools_result:
                 self.tools = tools_result["tools"]
@@ -99,7 +286,11 @@ class MCPDockerServer:
             return False
 
     def stop(self):
-        """Stop the Docker container."""
+        """Stop the persistent process (no-op for one-shot)."""
+        if self.oneshot:
+            self.status = "stopped"
+            self.tools = []
+            return
         if self.process:
             try:
                 self.process.stdin.close()
@@ -117,7 +308,10 @@ class MCPDockerServer:
         logger.info("[MCP:%s] Stopped", self.name)
 
     def call_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        """Call a tool via JSON-RPC over STDIO."""
+        """Call a tool — routes to oneshot or persistent path."""
+        if self.oneshot:
+            return self._run_oneshot(tool_name, arguments)
+
         if self.status != "running":
             return {
                 "ok": False,
@@ -139,12 +333,9 @@ class MCPDockerServer:
                 "error": f"No response from MCP server '{self.name}'",
             }
 
-        # MCP tool results have a "content" array
         if "content" in result:
-            texts = []
-            for item in result["content"]:
-                if item.get("type") == "text":
-                    texts.append(item.get("text", ""))
+            texts = [item.get("text", "") for item in result["content"]
+                     if item.get("type") == "text"]
             return {
                 "ok": True,
                 "status_code": 200,
@@ -224,6 +415,7 @@ class MCPDockerServer:
         return {
             "name": self.name,
             "type": "docker",
+            "mode": "oneshot" if self.oneshot else "persistent",
             "status": self.status,
             "tools": [t.get("name", "unknown") for t in self.tools],
             "tool_schemas": self.tools,
@@ -282,13 +474,14 @@ class MCPDockerBridge:
 
     def register_server(self, name: str, command: str, args: List[str],
                         env: Optional[Dict[str, str]] = None,
-                        auto_start: bool = True) -> Dict[str, Any]:
+                        auto_start: bool = True,
+                        oneshot: Optional[bool] = None) -> Dict[str, Any]:
         """Register and optionally start a Docker MCP server."""
         with self._lock:
             if name in self._servers:
                 self._servers[name].stop()
 
-            server = MCPDockerServer(name, command, args, env)
+            server = MCPDockerServer(name, command, args, env, oneshot=oneshot)
             self._servers[name] = server
 
         if auto_start:

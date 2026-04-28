@@ -13,6 +13,32 @@ logger = logging.getLogger(__name__)
 _workspace_root = Path(__file__).resolve().parents[1]
 _custom_mcp_servers: Dict[str, MCPServerConfig] = {}
 _music_state: Dict[str, Any] = {"status": "stopped", "volume": 50, "track": None}
+
+_PERSIST_PATH = _workspace_root / "mcp_servers.json"
+
+
+def _save_custom_servers() -> None:
+    """Persist custom MCP servers to mcp_servers.json."""
+    try:
+        data = {name: cfg.model_dump() for name, cfg in _custom_mcp_servers.items()}
+        _PERSIST_PATH.write_text(
+            __import__("json").dumps(data, indent=2), encoding="utf-8"
+        )
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning("[mcp] failed to persist custom servers: %s", exc)
+
+
+def load_persisted_servers() -> None:
+    """Load custom MCP servers from mcp_servers.json on startup."""
+    if not _PERSIST_PATH.exists():
+        return
+    try:
+        raw = __import__("json").loads(_PERSIST_PATH.read_text(encoding="utf-8"))
+        for name, cfg_dict in raw.items():
+            _custom_mcp_servers[name] = MCPServerConfig(**cfg_dict)
+        logger.info("[mcp] loaded %d persisted custom servers", len(raw))
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning("[mcp] failed to load persisted servers: %s", exc)
 _builtin_registry: Dict[str, Dict[str, Any]] = {
     "browser-search": {
         "enabled": True,
@@ -60,6 +86,7 @@ def list_servers() -> dict:
 
 def upsert_server(config: MCPServerConfig) -> dict:
     _custom_mcp_servers[config.name] = config
+    _save_custom_servers()
     return {"status": "registered", "server": config.model_dump()}
 
 
@@ -67,6 +94,7 @@ def delete_server(name: str) -> dict:
     removed = _custom_mcp_servers.pop(name, None)
     if removed is None:
         raise HTTPException(status_code=404, detail="MCP server not found")
+    _save_custom_servers()
     return {"status": "deleted", "name": name}
 
 

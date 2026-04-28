@@ -1,4 +1,5 @@
 """LLM API layer: endpoints + orchestration (routing/providers/streams live in dedicated modules)."""
+import asyncio
 import json
 import logging
 import os
@@ -34,6 +35,7 @@ from services.mcp_tools import (
     is_tool_allowed,
     list_servers,
     list_tools,
+    load_persisted_servers,
     set_server_enabled,
     tool_browser_search,
     tool_file_search,
@@ -187,6 +189,10 @@ def _build_tool_specs() -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         )
 
     return tool_specs, unavailable_servers
+
+
+# MCP tool call timeout (prevent infinite hangs when Docker can't reach external APIs)
+MCP_TOOL_TIMEOUT_SEC = 30.0
 
 
 def _execute_tool_call(call_request: MCPToolCallRequest) -> Dict[str, Any]:
@@ -651,6 +657,8 @@ async def load_mcp_config() -> None:
             logger.info("Loaded MCP config from %s (%d servers)", config_path, len(config.get("mcpServers", {})))
         except Exception as exc:  # pylint: disable=broad-except
             logger.warning("Failed to load MCP config: %s", exc)
+    # Load persisted custom MCP servers (registered via UI)
+    load_persisted_servers()
 
 
 @app.on_event("startup")
@@ -921,7 +929,22 @@ async def agent_loop(request: AgentLoopRequest):
                 tool=str(getattr(action, "tool", "")),
                 arguments=dict(getattr(action, "arguments", {}) or {}),
             )
-            return _execute_tool_call(req)
+            # Wrap in asyncio.wait_for to enforce timeout and prevent infinite hangs
+            try:
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(_execute_tool_call, req),
+                    timeout=MCP_TOOL_TIMEOUT_SEC,
+                )
+                return result
+            except asyncio.TimeoutError:
+                logger.error("[agent] Tool call timeout: %s.%s", req.server, req.tool)
+                return {
+                    "ok": False,
+                    "status_code": 504,
+                    "error_type": "timeout",
+                    "error": f"Tool call exceeded {MCP_TOOL_TIMEOUT_SEC}s timeout",
+                    "result": None,
+                }
 
         payload = await run_phase2_agent_loop(
             user_query=request.prompt,

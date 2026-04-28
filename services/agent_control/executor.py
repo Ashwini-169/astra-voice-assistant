@@ -12,6 +12,9 @@ from services.mcp_tools import call_tool, is_tool_allowed
 
 from .types import PlannerAction
 
+# Import timeout constant from llm_service
+MCP_TOOL_TIMEOUT_SEC = 30.0
+
 
 def _classify_error(message: str, status_code: int) -> str:
     msg = (message or "").lower()

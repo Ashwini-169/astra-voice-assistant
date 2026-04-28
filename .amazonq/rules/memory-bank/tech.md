@@ -102,6 +102,7 @@ HUGGINGFACE_HUB_CACHE=.hf_cache/hub
 .\start_stack.ps1                    # Start services + duplex conversation mode
 .\start_stack.ps1 -ShowTtsLogs       # Show TTS service window
 .\start_stack.ps1 -UseDevManager     # Use dev manager (auto-reload + per-service log files)
+.\show_service_logs.ps1             # Show all services' log
 ```
 
 ### Dev-Manager Log Files

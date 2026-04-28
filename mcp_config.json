@@ -11,6 +11,16 @@
       "env": {},
       "autoStart": true
     },
+    "youtube_transcript": {
+      "command": "docker",
+      "args": [
+        "run",
+        "-i",
+        "--rm",
+        "mcp/youtube-transcript"
+      ],"env": {},
+      "autoStart": true
+    },
     "fetch": {
       "command": "docker",
       "args": [
@@ -29,39 +39,61 @@
         "-i",
         "--rm",
         "-e",
-        "OBSIDIAN_API_KEY=6ceb539a63ff638b05a9d4b988b2171f9590546fbc0cd26a4d7d98f66c9c3a16",
+        "OBSIDIAN_API_URL=https://host.docker.internal:27124",
+        "-e",
+        "OBSIDIAN_API_KEY=56787bd1a0cc0105dcaf20cdfc24d0d52b4cd865ee7f4e0ef5c109dd33955f21",
+        "-e",
+        "OBSIDIAN_PROTOCOL=https",
         "-v",
         "C:/Users/hp/Documents/ObsidianVault:/vault",
         "mcp/obsidian"
       ],
       "env": {
+        "OBSIDIAN_API_URL": "https://host.docker.internal:27124",
         "OBSIDIAN_HOST": "host.docker.internal",
-        "OBSIDIAN_PORT": "27123",
-        "OBSIDIAN_API_KEY": "6ceb539a63ff638b05a9d4b988b2171f9590546fbc0cd26a4d7d98f66c9c3a16"
+        "OBSIDIAN_PORT": "27124",
+        "OBSIDIAN_PROTOCOL": "https",
+        "OBSIDIAN_API_KEY": "56787bd1a0cc0105dcaf20cdfc24d0d52b4cd865ee7f4e0ef5c109dd33955f21"
       },
       "autoStart": true
-    },
-    "duckduckgo": {
-      "command": "docker",
-      "args": [
-        "run",
-        "-i",
-        "--rm",
-        "mcp/duckduckgo"
-      ],
-      "env": {},
-      "autoStart": true
-    },
-    "youtube_transcript": {
-      "command": "docker",
-      "args": [
-        "run",
-        "-i",
-        "--rm",
-        "mcp/youtube_transcript"
-      ],
-      "env": {},
-      "autoStart": true
     }
+  },
+  "capability_policy": {
+    "search": [
+      {
+        "server": "duckduckgo",
+        "priority": 0.95
+      },
+      {
+        "server": "browser-search",
+        "priority": 0.8
+      }
+    ],
+    "fetch": [
+      {
+        "server": "duckduckgo",
+        "priority": 0.95
+      },
+      {
+        "server": "fetch",
+        "priority": 0.85
+      },
+      {
+        "server": "browser-search",
+        "priority": 0.6
+      }
+    ],
+    "time": [
+      {
+        "server": "time",
+        "priority": 1.0
+      }
+    ],
+    "storage": [
+      {
+        "server": "obsidian",
+        "priority": 0.95
+      }
+    ]
   }
 }
